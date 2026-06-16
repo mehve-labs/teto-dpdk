@@ -1,0 +1,22 @@
+[workspace]
+members = ["teto-tokio"]
+
+[package]
+name = "teto-dpdk"
+version = "0.1.0"
+edition = "2024"
+description = "Rust bindings for F-Stack — high-performance userspace TCP/UDP via DPDK, bypassing the Linux kernel network stack entirely."
+license = "AGPL-3.0-only"
+repository = "https://github.com/moewe-labs/teto-dpdk"
+homepage = "https://github.com/moewe-labs/teto-dpdk"
+keywords = ["dpdk", "fstack", "networking", "userspace", "tcp"]
+categories = ["network-programming", "asynchronous", "external-ffi-bindings"]
+readme = "README.md"
+links = "fstack"
+
+[dependencies]
+cxx = "1.0.194"
+
+[build-dependencies]
+cxx-build = "1.0.194"
+pkg-config = "0.3.32"

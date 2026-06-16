@@ -1,0 +1,147 @@
+teto-dpdk
+Copyright (C) 2026 moewe-labs
+
+This product statically links against F-Stack, which is distributed under the
+BSD 2-Clause License and bundles several other open-source components. The full
+text of those licenses is reproduced below as required by their terms.
+
+Source: https://github.com/F-Stack/f-stack
+
+------------------------------------------------------------------------------
+
+Main code of F-Stack is BSD 2-Clause licensed.
+Copyright (C) 2017-2022 THL A29 Limited, a Tencent company.
+All rights reserved.
+
+Other Dependencies:
+------------------------------------------------------------------------------
+This work contains some softwares from:
+DPDK(http://dpdk.org/),
+FreeBSD(https://www.freebsd.org/),
+Nginx(http://nginx.org),
+Redis(https://github.com/antirez/redis),
+Microthread framework(https://github.com/Tencent/MSEC/tree/master/spp_rpc/src/sync_frame/micro_thread).
+
+This work uses some codes from:
+Libplebnet(https://gitorious.org/freebsd/kmm-sandbox/commit/fa8a11970bc0ed092692736f175925766bebf6af?p=freebsd:kmm-sandbox.git;a=tree;f=lib/libplebnet;h=ae446dba0b4f8593b69b339ea667e12d5b709cfb;hb=refs/heads/work/svn_trunk_libplebnet),
+Libuinet(https://github.com/pkelsey/libuinet),
+inih(https://github.com/benhoyt/inih).
+
+1. DPDK
+
+The DPDK uses the Open Source BSD-3-Clause license for the core libraries and
+drivers. The kernel components are naturally GPL-2.0 licensed.
+
+2. FreeBSD
+
+BSD 4-Clause, Copyright (c) 1992-2021 The FreeBSD Project. All rights reserved.
+
+3. Libplebnet
+
+BSD 2-Clause, Copyright (c) 2010-2011 Kip Macy. All rights reserved.
+
+4. Libuinet
+
+BSD 2-Clause, Copyright (c) 2015 Patrick Kelsey. All rights reserved.
+
+5. inih (a simple .INI file parser)
+
+BSD 3-Clause, Copyright (c) 2009, Ben Hoyt. All rights reserved.
+
+6. Nginx
+
+BSD 2-Clause, Copyright (C) 2002-2021 Igor Sysoev
+Copyright (C) 2011-2025 Nginx, Inc.
+All rights reserved.
+
+7. Redis
+
+BSD 3-Clause, Copyright (c) 2006-2015, Salvatore Sanfilippo. All rights reserved.
+
+8. Microthread framework
+
+GPL-2.0, Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
+
+
+Terms of the BSD 2-Clause License:
+------------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Terms of the BSD 3-Clause License:
+------------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Terms of the BSD 4-Clause License:
+------------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. All advertising materials mentioning features or use of this software
+   must display the following acknowledgement:
+   This product includes software developed by the University of
+   California, Berkeley and its contributors.
+
+4. Neither the name of the University nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

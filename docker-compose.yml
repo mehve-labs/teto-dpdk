@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  teto-dpdk:
+    build: .
+    volumes:
+      - .:/app
+    # F-Stack and DPDK need high privileges to map memory, interact with network devices, and bypass kernel
+    privileged: true
+    #network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - SYS_RAWIO
+      - IPC_LOCK
+    # When testing locally with hugepages enabled on the host, you can uncomment this:
+    # volumes:
+    #   - /dev/hugepages:/dev/hugepages
+    command: tail -f /dev/null
