@@ -19,7 +19,7 @@ All I/O runs on `teto-dpdk`'s dedicated F-Stack/DPDK poll-mode thread, bypassing
 
 ## Requirements
 
-Like `teto-dpdk`, this crate links against F-Stack and DPDK and is intended to run inside the project's Docker environment, which handles hugepages and kernel module setup. See the [`teto-dpdk` README](https://github.com/moewe-labs/teto-dpdk) for build and deployment details.
+Like `teto-dpdk`, this crate links against F-Stack and DPDK and is intended to run inside the project's Docker environment, which handles hugepages and kernel module setup. See the [`teto-dpdk` README](https://github.com/mehve-labs/teto-dpdk) for build and deployment details.
 
 ## License
 

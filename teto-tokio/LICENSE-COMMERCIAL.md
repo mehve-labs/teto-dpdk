@@ -39,7 +39,7 @@ teto-dpdk statically links against the following BSD-licensed libraries. These l
 - **DPDK** — BSD 3-Clause License. Copyright (c) 2010–present, Intel Corporation and contributors.
   Source: <https://www.dpdk.org>
 
-A commercial license from moewe-labs does not and cannot waive these upstream BSD obligations.
+A commercial license from mehve-labs does not and cannot waive these upstream BSD obligations.
 
 ## Contact
 
