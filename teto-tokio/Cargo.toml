@@ -2,10 +2,12 @@
 name = "teto-tokio"
 version = "0.1.0"
 edition = "2024"
+authors = ["Mehve Labs <554170+davidebenato@users.noreply.github.com>"]
 description = "Async tokio adapter for teto-dpdk — TetoTcpListener, TetoTcpStream, and TetoUdpSocket with familiar async/await APIs over F-Stack/DPDK."
 license = "AGPL-3.0-only"
 repository = "https://github.com/moewe-labs/teto-dpdk"
 homepage = "https://github.com/moewe-labs/teto-dpdk"
+documentation = "https://docs.rs/teto-tokio"
 keywords = ["dpdk", "fstack", "tokio", "async", "networking"]
 categories = ["network-programming", "asynchronous"]
 readme = "README.md"

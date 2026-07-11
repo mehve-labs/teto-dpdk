@@ -1,4 +1,12 @@
 fn main() {
+    // docs.rs builds in a network-isolated sandbox without F-Stack or DPDK and
+    // only runs `cargo doc`, which compiles the crate but never links. Skip the
+    // native cxx/pkg-config build entirely — the cxx bridge still expands to
+    // pure-Rust FFI declarations, so rustdoc succeeds without them.
+    if std::env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/config.rs");
     println!("cargo:rerun-if-changed=src/fstack.rs");
