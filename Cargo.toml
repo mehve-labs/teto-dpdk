@@ -5,6 +5,7 @@ members = ["teto-tokio"]
 name = "teto-dpdk"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 authors = ["Mehve Labs <554170+davidebenato@users.noreply.github.com>"]
 description = "Rust bindings for F-Stack — high-performance userspace TCP/UDP via DPDK, bypassing the Linux kernel network stack entirely."
 license = "AGPL-3.0-only"

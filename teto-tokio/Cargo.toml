@@ -2,6 +2,7 @@
 name = "teto-tokio"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 authors = ["Mehve Labs <554170+davidebenato@users.noreply.github.com>"]
 description = "Async tokio adapter for teto-dpdk — TetoTcpListener, TetoTcpStream, and TetoUdpSocket with familiar async/await APIs over F-Stack/DPDK."
 license = "AGPL-3.0-only"

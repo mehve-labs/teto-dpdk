@@ -48,8 +48,12 @@ WORKDIR /opt/f-stack/dpdk
 RUN mkdir -p /lib/modules/$(uname -r)/build && \
     printf "kernelversion:\n\t@echo 6.6.0\n" > /lib/modules/$(uname -r)/build/Makefile
 
-# Build static library with -fPIC to allow linking into C++ / Rust cxx code
-RUN meson setup build -Ddefault_library=static -Dc_args=-fPIC -Denable_kmods=false && \
+# Build static library with -fPIC to allow linking into C++ / Rust cxx code.
+# -Dplatform=generic: build a portable x86-64 baseline instead of the default
+# -march=native. Under QEMU emulation (Apple Silicon host) -march=native can
+# select CPU features QEMU advertises but doesn't fully emulate, causing SIGILL
+# at runtime; the generic baseline avoids that.
+RUN meson setup build -Dplatform=generic -Ddefault_library=static -Dc_args=-fPIC -Denable_kmods=false && \
     ninja -C build && \
     ninja -C build install && \
     ldconfig
