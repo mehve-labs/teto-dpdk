@@ -1,5 +1,5 @@
 teto-dpdk
-Copyright (C) 2026 moewe-labs
+Copyright (C) 2026 mehve-labs
 
 This product statically links against F-Stack, which is distributed under the
 BSD 2-Clause License and bundles several other open-source components. The full
