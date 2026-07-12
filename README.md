@@ -197,4 +197,11 @@ teto-dpdk/                          (Cargo workspace root)
 
 ## License
 
-Dual-licensed: [AGPL-3.0-only](LICENSE) for open-source use, or a [commercial license](LICENSE-COMMERCIAL.md) — see [NOTICE](NOTICE) for third-party attributions.
+This project is dual-licensed. You may use it under **either** license — your choice:
+
+- **Open Source**: [AGPL-3.0-only](LICENSE) -- free for everyone, any purpose (including commercial), provided you meet the AGPL-3.0 copyleft terms.
+- **Commercial**: A proprietary license for those who prefer not to comply with the AGPL-3.0 copyleft obligations (e.g. building a closed-source or hosted product, or avoiding the Section 13 network-use disclosure). See [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) for details.
+
+There are no restrictions based on company size or revenue: anyone may use teto-dpdk for free under the AGPL-3.0. See [NOTICE](NOTICE) for third-party attributions.
+
+Contributions are accepted under a lightweight [Contributor License Agreement](CONTRIBUTING.md), which lets the project maintain its dual-licensing model.
