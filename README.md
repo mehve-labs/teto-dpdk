@@ -5,7 +5,7 @@
 *Named after Nausicaä's fox-squirrel companion: small, fast, and fiercely reliable.*
 
 [![Crates.io](https://img.shields.io/crates/v/teto-dpdk.svg)](https://crates.io/crates/teto-dpdk)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ## Overview
 
@@ -197,11 +197,10 @@ teto-dpdk/                          (Cargo workspace root)
 
 ## License
 
-This project is dual-licensed. You may use it under **either** license — your choice:
+This project is licensed under the [Apache License 2.0](LICENSE) — free for everyone, any purpose (including proprietary and closed-source use), subject only to the attribution and notice terms of the license.
 
-- **Open Source**: [AGPL-3.0-only](LICENSE) -- free for everyone, any purpose (including commercial), provided you meet the AGPL-3.0 copyleft terms.
-- **Commercial**: A proprietary license for those who prefer not to comply with the AGPL-3.0 copyleft obligations (e.g. building a closed-source or hosted product, or avoiding the Section 13 network-use disclosure). See [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) for details.
+teto-dpdk statically links against [F-Stack](https://github.com/F-Stack/f-stack) and, through it, other third-party components (DPDK, FreeBSD, Nginx, Redis and others) under their own permissive and copyleft licenses. Those licenses are unaffected by this project's license and continue to govern their respective components — see [NOTICE](NOTICE) for the full attributions and terms.
 
-There are no restrictions based on company size or revenue: anyone may use teto-dpdk for free under the AGPL-3.0. See [NOTICE](NOTICE) for third-party attributions.
+**Note for downstream:** teto-dpdk is licensed permissively, but building it links against F-Stack/DPDK and related components, some of which are BSD- or GPL-2.0-licensed (see [NOTICE](NOTICE)). If you distribute a **compiled binary** that statically links these, that binary's redistribution terms are governed by those components' licenses — not by teto-dpdk's Apache-2.0 license. Using teto-dpdk as a source dependency imposes no such obligation on you.
 
-Contributions are accepted under a lightweight [Contributor License Agreement](CONTRIBUTING.md), which lets the project maintain its dual-licensing model.
+Unless you explicitly state otherwise, any contribution you submit for inclusion in teto-dpdk shall be licensed under the Apache License 2.0, without any additional terms or conditions. See [CONTRIBUTING.md](CONTRIBUTING.md).

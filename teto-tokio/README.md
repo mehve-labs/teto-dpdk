@@ -3,7 +3,7 @@
 **Async [tokio](https://tokio.rs) adapter for [`teto-dpdk`](https://crates.io/crates/teto-dpdk)** — familiar async/await networking over F-Stack/DPDK userspace TCP/UDP.
 
 [![Crates.io](https://img.shields.io/crates/v/teto-tokio.svg)](https://crates.io/crates/teto-tokio)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ## Overview
 
@@ -23,9 +23,8 @@ Like `teto-dpdk`, this crate links against F-Stack and DPDK and is intended to r
 
 ## License
 
-Dual-licensed. You may use it under **either** license — your choice:
+Licensed under the [Apache License 2.0](LICENSE) — free for everyone, any purpose (including proprietary and closed-source use), subject only to the attribution and notice terms of the license. See [NOTICE](NOTICE) for third-party attributions.
 
-- **Open Source**: [AGPL-3.0-only](LICENSE) -- free for everyone, any purpose (including commercial), provided you meet the AGPL-3.0 copyleft terms.
-- **Commercial**: A proprietary license for those who prefer not to comply with the AGPL-3.0 copyleft obligations. See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+**Note for downstream:** teto-tokio is licensed permissively, but it builds on `teto-dpdk`, which statically links F-Stack/DPDK and related components, some of which are BSD- or GPL-2.0-licensed (see [NOTICE](NOTICE)). If you distribute a **compiled binary** that statically links these, that binary's redistribution terms are governed by those components' licenses — not by teto-tokio's Apache-2.0 license. Using teto-tokio as a source dependency imposes no such obligation on you.
 
-There are no restrictions based on company size or revenue: anyone may use teto-tokio for free under the AGPL-3.0. Contributions are accepted under the repository's [Contributor License Agreement](https://github.com/mehve-labs/teto-dpdk/blob/master/CONTRIBUTING.md).
+Unless you explicitly state otherwise, any contribution you submit for inclusion in teto-tokio shall be licensed under the Apache License 2.0, without any additional terms or conditions. See the repository's [CONTRIBUTING.md](https://github.com/mehve-labs/teto-dpdk/blob/master/CONTRIBUTING.md).

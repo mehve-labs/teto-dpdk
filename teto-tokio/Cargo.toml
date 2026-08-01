@@ -1,11 +1,11 @@
 [package]
 name = "teto-tokio"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
-authors = ["Mehve Labs <554170+davidebenato@users.noreply.github.com>"]
+authors = ["Mehve Labs <mehvelabs@gmail.com>"]
 description = "Async tokio adapter for teto-dpdk — TetoTcpListener, TetoTcpStream, and TetoUdpSocket with familiar async/await APIs over F-Stack/DPDK."
-license = "AGPL-3.0-only"
+license = "Apache-2.0"
 repository = "https://github.com/mehve-labs/teto-dpdk"
 homepage = "https://github.com/mehve-labs/teto-dpdk"
 documentation = "https://docs.rs/teto-tokio"
@@ -14,6 +14,6 @@ categories = ["network-programming", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-teto-dpdk = { path = "..", version = "0.1.2" }
+teto-dpdk = { path = "..", version = "0.2.0" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "io-util"] }
 bytes = "1"
