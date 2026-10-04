@@ -10,7 +10,7 @@ Docker is the recommended way to develop and test teto-dpdk. DPDK and F-Stack re
 - Works on Linux and WSL2
 - ~6 GB disk space for the image
 
-> **Tested against:** [F-Stack](https://github.com/F-Stack/f-stack) master. The Dockerfile deliberately tracks master rather than the 1.21.6 LTS tag: the DPDK bundled with 1.21.6 has a `net_tap` RX checksum bug that silently drops every valid TCP packet (UDP is unaffected). If you pin to a release, re-run the TCP echo tests below first.
+> **Tested against:** [F-Stack](https://github.com/F-Stack/f-stack) v1.25 (DPDK 23.11.5), pinned in the Dockerfile. Avoid F-Stack master as of mid-2026: its FreeBSD 15 port never runs kernel timers, so TCP retransmission, delayed ACKs and keepalives don't work. Avoid 1.21.x too: its bundled DPDK has a `net_tap` RX checksum bug that drops every TCP packet. When changing versions, run `cargo test --workspace` in the container first.
 
 ## 1. Build the image
 

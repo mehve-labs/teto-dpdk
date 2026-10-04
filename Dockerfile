@@ -34,13 +34,18 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /opt
 
-# Clone F-Stack and its bundled DPDK submodule
-# F-Stack has custom patches to DPDK so it's required to use their submodule.
-# Master (not the 1.21.6 LTS tag): the DPDK bundled with 1.21.6 has a net_tap
-# RX checksum bug that flags every valid TCP packet PKT_RX_L4_CKSUM_BAD, which
-# F-Stack silently drops — UDP echoes work but TCP SYNs vanish. Master bundles
-# a DPDK with the upstream fix. If pinning to a release, verify TCP over TAP.
-RUN git clone --recurse-submodules --depth 1 https://github.com/F-Stack/f-stack.git
+# Clone F-Stack and its bundled DPDK (F-Stack carries patches to DPDK, so use
+# the bundled copy). Pinned to the v1.25 release (DPDK 23.11.5), verified by
+# commit so a moved tag can't change the build. Don't track master: as of
+# 956c4158 (Jul 2026) its FreeBSD 15 port runs no kernel callouts at all, so
+# delayed ACKs, keepalives and TCP retransmission never fire (a lost packet
+# hangs the connection). Older releases are no good either: the DPDK bundled
+# with 1.21.6 has a net_tap RX checksum bug that drops every TCP packet.
+# When bumping, re-run the integration tests (TCP over TAP, timers).
+ARG FSTACK_REF=v1.25
+ARG FSTACK_COMMIT=761639943bdda33103aa98241ca6a3079f1c1b7e
+RUN git clone --recurse-submodules --depth 1 --branch ${FSTACK_REF} https://github.com/F-Stack/f-stack.git && \
+    test "$(git -C f-stack rev-parse HEAD)" = "${FSTACK_COMMIT}"
 
 # Build DPDK
 WORKDIR /opt/f-stack/dpdk
