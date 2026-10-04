@@ -141,6 +141,17 @@ pub(crate) struct UdpEntry {
     pending: Option<(Bytes, SocketAddrV4)>,
     rx_buf: BytesMut,
     shared: Arc<Shared>,
+    /// Receive interest withdrawn because the application's queue is full
+    /// (or gone); see `recv_ready`.
+    pub(crate) rx_paused: bool,
+}
+
+/// Why `UdpEntry::recv_ready` stopped.
+pub(crate) enum RecvStop {
+    /// Nothing more to read right now (or the per-tick batch is used up).
+    Drained,
+    /// The application's queue is full or closed: stop watching for input.
+    QueueUnavailable,
 }
 
 impl UdpEntry {
@@ -153,12 +164,22 @@ impl UdpEntry {
             pending: None,
             rx_buf: BytesMut::new(),
             shared: parts.shared,
+            rx_paused: false,
         }
     }
 
+    pub(crate) fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    /// Whether the application's queue has room again after a pause.
+    pub(crate) fn can_resume(&self) -> bool {
+        !self.rx_tx.is_closed() && self.rx_tx.capacity() > 0
+    }
+
+    /// Send queued datagrams; called every tick.
     pub(crate) fn tick(&mut self) {
         self.send_batch();
-        self.recv_batch();
     }
 
     /// The `TetoUdpSocket` has been dropped and every queued datagram sent.
@@ -192,13 +213,14 @@ impl UdpEntry {
         }
     }
 
-    fn recv_batch(&mut self) {
+    /// Receive what F-Stack has queued (the socket was reported readable).
+    pub(crate) fn recv_ready(&mut self) -> RecvStop {
         for _ in 0..BATCH {
             // Reserve queue space first: if the application is behind, leave
             // datagrams in F-Stack's receive buffer (which drops on overflow).
             let permit = match self.rx_tx.try_reserve() {
                 Ok(p) => p,
-                Err(TrySendError::Full(()) | TrySendError::Closed(())) => return,
+                Err(TrySendError::Full(()) | TrySendError::Closed(())) => return RecvStop::QueueUnavailable,
             };
             if self.rx_buf.capacity() - self.rx_buf.len() < MAX_DATAGRAM {
                 self.rx_buf = BytesMut::with_capacity(RX_BLOCK);
@@ -210,14 +232,15 @@ impl UdpEntry {
                     unsafe { self.rx_buf.set_len(n) };
                     permit.send(Ok((self.rx_buf.split().freeze(), from.into())));
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return RecvStop::Drained,
                 Err(e) => {
-                    // At most one error per tick, so a persistent error
+                    // At most one error per batch, so a persistent error
                     // can't flood the queue.
                     permit.send(Err(e));
-                    return;
+                    return RecvStop::Drained;
                 }
             }
         }
+        RecvStop::Drained
     }
 }

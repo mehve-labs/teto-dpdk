@@ -19,7 +19,7 @@ use teto_dpdk::FStack;
 
 use crate::conn::{Conn, ConnError, ConnState, Notifier, Wakes, WriteShutdown, RX_HIGH, RX_LOW, TX_LIMIT};
 use crate::runtime::Cmd;
-use crate::udp_socket::UdpEntry;
+use crate::udp_socket::{RecvStop, UdpEntry};
 
 const READ_CHUNK: usize = 64 * 1024;
 const EVENTS_CAPACITY: usize = 1024;
@@ -150,10 +150,7 @@ impl Driver {
 
         self.maintain_listeners();
         self.maintain_connecting();
-        self.udp.retain(|_, u| {
-            u.tick();
-            !u.finished()
-        });
+        self.maintain_udp();
 
         if let Err(e) = self.kq.poll(&mut self.events) {
             // Can't happen while F-Stack runs; if it does, fail every stream
@@ -169,6 +166,11 @@ impl Driver {
                 self.accept_ready(id);
             } else if self.connecting.contains_key(&id) {
                 self.finish_connect(id);
+            } else if let Some(u) = self.udp.get_mut(&id) {
+                if let RecvStop::QueueUnavailable = u.recv_ready() {
+                    let _ = self.kq.deregister(u.socket());
+                    u.rx_paused = true;
+                }
             } else if ev.is_send_empty() {
                 // A dropped stream's data (and FIN) has been acknowledged.
                 self.close(id, None);
@@ -234,14 +236,15 @@ impl Driver {
                 }
             }
             Cmd::BindUdp { addr, parts, reply } => {
+                let id = self.next_id();
                 let bound = UdpSocket::bind(&self.fs, addr).and_then(|s| {
                     let local = s.local_addr()?.into();
+                    self.kq.register(&s, id, Interest::READABLE)?;
                     Ok((s, local))
                 });
                 match bound {
                     Ok((socket, local)) => {
                         if reply.send(Ok(local)).is_ok() {
-                            let id = self.next_id();
                             self.udp.insert(id, UdpEntry::new(socket, parts));
                         }
                     }
@@ -283,6 +286,19 @@ impl Driver {
         }
     }
 
+    /// Send queued datagrams, resume receiving on sockets whose queue has
+    /// room again, and drop sockets the application is done with.
+    fn maintain_udp(&mut self) {
+        let kq = &self.kq;
+        self.udp.retain(|&id, u| {
+            u.tick();
+            if u.rx_paused && u.can_resume() && kq.register(u.socket(), id, Interest::READABLE).is_ok() {
+                u.rx_paused = false;
+            }
+            !u.finished()
+        });
+    }
+
     /// Abandon connects whose caller gave up (e.g. a timeout dropped the
     /// future); dropping the socket closes it.
     fn maintain_connecting(&mut self) {
@@ -304,9 +320,12 @@ impl Driver {
                     self.next_id += 1;
                     // Not registered until the application accepts it (see
                     // `desired_interest`), so queued connections don't buffer.
+                    // The listener may be bound to a wildcard address; report
+                    // the address this connection actually arrived on.
+                    let local = stream.local_addr().map(SocketAddr::V4).unwrap_or(l.local);
                     let conn = Arc::new(Conn::new(id, self.notifier.clone()));
                     self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::NONE });
-                    permit.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local: l.local }));
+                    permit.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local }));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break None,
                 // The client went away before or during setup (the failed
@@ -353,7 +372,9 @@ impl Driver {
         let peer = stream.peer_addr();
         let conn = Arc::new(Conn::new(id, self.notifier.clone()));
         conn.lock().accepted = true;
-        self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::NONE });
+        // Still registered for WRITABLE from connecting; `service` below
+        // switches it to what the connection needs.
+        self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::WRITABLE });
         // If the caller is gone, `Connected`'s drop marks the stream dropped.
         let _ = reply.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local: local.into() }));
         self.service(id);

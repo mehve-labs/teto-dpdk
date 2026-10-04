@@ -60,6 +60,8 @@ async fn check_listener(listener: &mut TetoTcpListener, addr: SocketAddr, msg: &
         v
     });
     let (mut s, _) = timeout(Duration::from_secs(100), listener.accept()).await.unwrap().unwrap();
+    // The real local address, not the listener's wildcard.
+    assert_eq!(s.local_addr(), addr);
     let mut v = Vec::new();
     timeout(T, s.read_to_end(&mut v)).await.unwrap().unwrap();
     timeout(T, s.write_all(&v)).await.unwrap().unwrap();
@@ -137,6 +139,37 @@ fn runtime_suite() {
         .await;
         assert_eq!(got, b"udp reply");
 
+        // UDP receive pauses while the application's queue is full and
+        // resumes once it has been drained.
+        let udp2 = TetoUdpSocket::bind(&rt, sa("0.0.0.0:9001")).await.expect("bind udp 9001");
+        let flood = blocking(|| {
+            let c = StdUdpSocket::bind("0.0.0.0:0").unwrap();
+            for i in 0..3000u32 {
+                let _ = c.send_to(&i.to_be_bytes(), "10.0.0.1:9001");
+            }
+            c
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut drained = 0;
+        while timeout(Duration::from_millis(300), udp2.recv_from(&mut buf)).await.is_ok() {
+            drained += 1;
+        }
+        assert!(drained >= 1024, "only {drained} datagrams queued before the pause");
+        blocking(move || {
+            for _ in 0..10 {
+                flood.send_to(b"after", "10.0.0.1:9001").unwrap();
+            }
+        })
+        .await;
+        let mut after = 0;
+        while after < 10 {
+            let (n, _) = timeout(T, udp2.recv_from(&mut buf)).await.expect("receive resumed").unwrap();
+            if &buf[..n] == b"after" {
+                after += 1;
+            }
+        }
+
         // F1: outbound connections.
         kernel_echo_server(9100);
         let mut up = timeout(T, TetoTcpStream::connect(&rt, sa("10.0.0.2:9100"), opts.clone()))
@@ -183,7 +216,7 @@ fn runtime_suite() {
 
         // Once every handle is gone the F-Stack thread exits (teardown
         // removes the TAP device).
-        drop((rt, a, b, udp, again));
+        drop((rt, a, b, udp, udp2, again));
         let deadline = Instant::now() + Duration::from_secs(15);
         while std::path::Path::new("/sys/class/net/dtap0").exists() {
             assert!(Instant::now() < deadline, "F-Stack thread didn't exit");

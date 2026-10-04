@@ -44,6 +44,10 @@ struct Shared {
 /// from it has been dropped (after giving closing connections time to deliver
 /// their data); F-Stack can't be restarted in the same process afterwards.
 ///
+/// Like any socket library, data still being delivered is lost if the
+/// process exits first: if `main` returns right after dropping a stream that
+/// had unsent data, that data is discarded.
+///
 /// ```rust,no_run
 /// use teto_dpdk::config::{FStackConfig, TcpSocketOptions};
 /// use teto_tokio::{TetoRuntime, TetoTcpListener, TetoTcpStream, TetoUdpSocket};
@@ -72,7 +76,8 @@ impl TetoRuntime {
     /// Initialise F-Stack on a new thread and start its poll loop.
     ///
     /// F-Stack can be initialised once per process: a second call (or a call
-    /// after a failed one) returns [`io::ErrorKind::AlreadyExists`].
+    /// after a failed one) returns [`io::ErrorKind::AlreadyExists`]. That
+    /// includes cancelling this future after initialisation has started.
     pub async fn start(cfg: FStackConfig) -> io::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel::<io::Result<()>>();
