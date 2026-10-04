@@ -27,6 +27,9 @@ abort and soundness bugs in 0.2.0. **Breaking.**
   own `--vdev` argument.
 
 ### Added
+- `FStackConfig::with_process(ProcType, id)`: run as one process of an F-Stack
+  multi-process group, one process per core (requires hugepages; see
+  `docs/architecture.md`, "Scaling across cores").
 - `TetoRuntime`: any number of listeners, UDP sockets and connections on one
   F-Stack thread; a failed bind leaves it usable; it exits when unused.
 - Outbound TCP: `TetoTcpStream::connect` / `connect_from`, `net::TcpStream::connect` / `connect_from` / `take_error`.

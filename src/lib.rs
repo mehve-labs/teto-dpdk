@@ -34,5 +34,5 @@ pub mod net;
 mod runtime;
 mod sys;
 
-pub use config::{FStackConfig, TcpSocketOptions};
+pub use config::{FStackConfig, ProcType, TcpSocketOptions};
 pub use runtime::FStack;

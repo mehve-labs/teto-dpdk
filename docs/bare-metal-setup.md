@@ -255,6 +255,45 @@ To compare against the kernel stack, run `scripts/bench.sh`'s two-host procedure
 
 ---
 
+## 8. Multiple cores (optional)
+
+One process serves one core and one NIC queue. To use N cores, run N
+processes on the same NIC (see "Scaling across cores" in
+[architecture.md](architecture.md#scaling-across-cores) for how traffic is
+split). This hasn't been validated on hardware by the project yet.
+
+List the cores in `lcore_mask` and in the port's `lcore_list`. Isolate all
+of them (step 4). For cores 1–4:
+
+```ini
+[dpdk]
+lcore_mask=1e
+...
+
+[port0]
+...
+lcore_list=1,2,3,4
+```
+
+Start process 0 as the primary, then the others as secondaries once it has
+initialised, all with the same `config.ini`:
+
+```rust
+use teto_dpdk::{FStackConfig, ProcType};
+
+// id = 0 for the first process, 1..N for the others.
+let proc_type = if id == 0 { ProcType::Primary } else { ProcType::Secondary };
+let cfg = FStackConfig::for_bare_metal().with_process(proc_type, id);
+```
+
+Each process binds the same address and port. If a secondary can't attach
+(no primary running, or no hugepages), DPDK exits the process with status 1.
+If the primary exits, restart all of them. The NIC must support RSS with as
+many queues as processes. On AWS, the number of ENA queues depends on
+the instance size.
+
+---
+
 ## AWS-specific notes
 
 Not validated by this project; these are the standard DPDK-on-EC2 steps.

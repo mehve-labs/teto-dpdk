@@ -68,7 +68,9 @@ fn echo_many_connections() {
     })
     .expect("run");
     clients.join().expect("clients");
-    assert_eq!(served, 50);
+    // Each client checks its own echo. A client whose connect timed out while
+    // the handshake was in flight retries, so the server can see extras.
+    assert!(served >= 50, "served {served}");
 }
 
 #[test]

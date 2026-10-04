@@ -43,6 +43,27 @@ pub struct FStackConfig {
     config_file: String,
     eal_args:    Vec<String>,
     capture_init_output: bool,
+    process:     Option<(ProcType, u16)>,
+}
+
+/// Role of this process in an F-Stack multi-process group (see
+/// [`FStackConfig::with_process`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcType {
+    /// Owns the NIC and the shared memory; must be started (and finish
+    /// initialising) before any secondary.
+    Primary,
+    /// Attaches to the primary's NIC and memory and serves its own queue.
+    Secondary,
+}
+
+impl ProcType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProcType::Primary => "primary",
+            ProcType::Secondary => "secondary",
+        }
+    }
 }
 
 impl FStackConfig {
@@ -52,6 +73,7 @@ impl FStackConfig {
             config_file: config_file.into(),
             eal_args:    Vec::new(),
             capture_init_output: false,
+            process:     None,
         }
     }
 
@@ -84,6 +106,26 @@ impl FStackConfig {
     /// print in that window is captured too. Off by default.
     pub fn capture_init_output(mut self, capture: bool) -> Self {
         self.capture_init_output = capture;
+        self
+    }
+
+    /// Run as process `proc_id` of an F-Stack multi-process group, to scale
+    /// across cores: one process per core, each with its own NIC queue (RSS
+    /// spreads flows across them) and its own stack.
+    ///
+    /// `proc_id` indexes the cores in `lcore_mask` (`config.ini`): 0 is the
+    /// lowest set bit. Process 0 is normally the [`ProcType::Primary`] and
+    /// must finish initialising before the secondaries start. Each process
+    /// runs its own [`FStack`](crate::FStack) (or teto-tokio runtime) and can
+    /// listen on the same address and port; a connection is served entirely
+    /// by the process whose queue receives it.
+    ///
+    /// DPDK multi-process requires hugepages, so this does not work with
+    /// `no_huge=1` (the Docker profile). Not set by default: a single
+    /// process uses the first core in `lcore_mask`. See
+    /// `docs/architecture.md` ("Scaling across cores").
+    pub fn with_process(mut self, proc_type: ProcType, proc_id: u16) -> Self {
+        self.process = Some((proc_type, proc_id));
         self
     }
 
@@ -149,11 +191,16 @@ impl FStackConfig {
 
     /// The arguments passed to `ff_load_config` (F-Stack's config parser).
     pub fn config_args(&self) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "teto".to_string(),
             "--conf".to_string(),
             self.config_file.clone(),
-        ]
+        ];
+        if let Some((proc_type, proc_id)) = self.process {
+            args.push(format!("--proc-type={}", proc_type.as_str()));
+            args.push(format!("--proc-id={proc_id}"));
+        }
+        args
     }
 
     /// Extra EAL arguments injected into `dpdk_argv` after `ff_load_config`.
@@ -246,4 +293,23 @@ impl TcpSocketOptions {
     pub fn linger_secs(mut self, v: u32) -> Self { self.linger_secs = Some(v); self }
     /// Set [`reuse_port`](Self::reuse_port) (`SO_REUSEPORT`, listeners only).
     pub fn reuse_port(mut self, v: bool) -> Self { self.reuse_port = Some(v); self }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_process_by_default() {
+        assert_eq!(FStackConfig::new("f.ini").config_args(), ["teto", "--conf", "f.ini"]);
+    }
+
+    #[test]
+    fn process_args() {
+        let cfg = FStackConfig::new("f.ini").with_process(ProcType::Secondary, 3);
+        assert_eq!(
+            cfg.config_args(),
+            ["teto", "--conf", "f.ini", "--proc-type=secondary", "--proc-id=3"]
+        );
+    }
 }

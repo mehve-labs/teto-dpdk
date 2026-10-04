@@ -181,11 +181,47 @@ targets, and downstream applications would fail to link; CI builds
   `OUT_DIR`. Building needs GNU binutils (`ld`, `readelf`, `ar`), i.e. Linux.
 - `FF_PATH` selects the F-Stack tree (default `/opt/f-stack`).
 
+## Scaling across cores
+
+One F-Stack instance is one thread on one NIC queue. To use more cores, run
+more processes: F-Stack's multi-process mode gives each process its own core,
+its own NIC queue and its own FreeBSD stack, and nothing is shared on the data
+path.
+
+- `lcore_mask` in `config.ini` lists the cores, and the port's `lcore_list`
+  lists the same cores (one RX/TX queue each). Every process uses the same
+  `config.ini`.
+- Each process is started with
+  `FStackConfig::with_process(ProcType::Primary | ProcType::Secondary, id)`.
+  `id` picks the process's core: the `id`-th set bit of `lcore_mask`. Process
+  0 is the primary: it configures the NIC (one queue per process, RSS
+  enabled) and the shared memory. Start it first and let it finish
+  initialising before starting the secondaries.
+- Each process runs its own `FStack` or teto-tokio runtime (`TetoRuntime`
+  and local mode are per-process singletons, so nothing changes in the
+  code), and each listens on the same address and port. The NIC's RSS hash
+  sends each flow to one queue, so a connection lives entirely in one
+  process. ARP replies are copied to every process.
+- Outbound IPv4 connections pick a local port whose RSS hash maps back to
+  the connecting process's queue, so replies reach the right process.
+  F-Stack doesn't do this for IPv6, and `connect_from` with an explicit
+  port bypasses it, so either can have replies land on another process.
+- If the primary exits, the secondaries have to be restarted with it.
+
+DPDK multi-process requires hugepages: a secondary maps the primary's memory
+from hugepage files. It can't run with `no_huge=1`, so it can't run in the
+Docker setup. Tried there, the secondary fails with
+`Could not open /var/run/dpdk/rte/hugepage_data`. Because DPDK calls
+`rte_exit` on that failure, the process exits instead of `init` returning an
+error. The primary alone runs fine in Docker with two af_packet queues
+(`qpairs=2`). Setup steps are in
+[bare-metal-setup.md](bare-metal-setup.md#8-multiple-cores-optional).
+
 ## Known limits
 
-- **One core.** One F-Stack thread with one NIC queue. Scaling across cores
-  would follow F-Stack's process-per-lcore model with RSS; that's not designed
-  yet.
+- **One core per process.** Scaling is one process per core (see above),
+  and it's untested by the project because it needs hugepages. Within a
+  process, everything runs on the F-Stack thread.
 - **Cross-thread hop (`TetoRuntime`).** Every operation crosses between
   tokio's threads and the F-Stack thread, with a mutex and a wakeup each way.
   In the Docker setup that roughly doubles echo latency (p50 11.6 µs vs
