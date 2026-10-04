@@ -15,6 +15,7 @@ use crate::sys::{cvt32, ffi};
 // Values from F-Stack's ff_event.h (FreeBSD numbering).
 const EVFILT_READ: i16 = -1;
 const EVFILT_WRITE: i16 = -2;
+const EVFILT_EMPTY: i16 = -13;
 const EV_ADD: u16 = 0x0001;
 const EV_DELETE: u16 = 0x0002;
 const EV_ERROR: u16 = 0x4000;
@@ -39,6 +40,9 @@ impl Interest {
     pub const NONE: Interest = Interest(0);
     pub const READABLE: Interest = Interest(1);
     pub const WRITABLE: Interest = Interest(2);
+    /// The socket's send buffer is empty: for TCP, everything written has
+    /// been acknowledged by the peer (FreeBSD `EVFILT_EMPTY`).
+    pub const SEND_EMPTY: Interest = Interest(4);
 
     pub fn is_readable(self) -> bool {
         self.0 & 1 != 0
@@ -46,6 +50,10 @@ impl Interest {
 
     pub fn is_writable(self) -> bool {
         self.0 & 2 != 0
+    }
+
+    pub fn is_send_empty(self) -> bool {
+        self.0 & 4 != 0
     }
 
     pub fn is_none(self) -> bool {
@@ -74,6 +82,7 @@ pub struct Event {
     token: u64,
     readable: bool,
     writable: bool,
+    send_empty: bool,
     eof: bool,
     error: bool,
 }
@@ -90,6 +99,11 @@ impl Event {
 
     pub fn is_writable(&self) -> bool {
         self.writable
+    }
+
+    /// See [`Interest::SEND_EMPTY`].
+    pub fn is_send_empty(&self) -> bool {
+        self.send_empty
     }
 
     /// The peer closed this direction, or the connection failed. The next
@@ -130,6 +144,7 @@ impl Events {
             token: k.udata,
             readable: k.filter == EVFILT_READ,
             writable: k.filter == EVFILT_WRITE,
+            send_empty: k.filter == EVFILT_EMPTY,
             eof: k.flags & EV_EOF != 0,
             error: k.flags & EV_ERROR != 0,
         })
@@ -155,7 +170,8 @@ impl Kqueue {
     pub fn register(&self, source: &impl Source, token: u64, interest: Interest) -> io::Result<()> {
         let fd = source.fd()?;
         self.set_filter(fd, EVFILT_READ, token, interest.is_readable())?;
-        self.set_filter(fd, EVFILT_WRITE, token, interest.is_writable())
+        self.set_filter(fd, EVFILT_WRITE, token, interest.is_writable())?;
+        self.set_filter(fd, EVFILT_EMPTY, token, interest.is_send_empty())
     }
 
     /// Remove all interest for `source`.

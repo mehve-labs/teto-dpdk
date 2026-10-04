@@ -193,6 +193,14 @@ impl TcpStream {
         cvt32(ffi::sock_shutdown(self.fd.get()?, how)).map(drop)
     }
 
+    /// Close the connection abortively: the peer gets RST and anything still
+    /// unsent or unacknowledged is discarded.
+    pub fn abort(self) {
+        if let Ok(fd) = self.fd.get() {
+            let _ = ffi::sock_set_opt(fd, ffi::SockOpt::Linger, 0);
+        }
+    }
+
     /// Bytes written but not yet acknowledged by the peer (FreeBSD
     /// `FIONWRITE`). Zero after a write shutdown means everything, up to
     /// the FIN, has been delivered.

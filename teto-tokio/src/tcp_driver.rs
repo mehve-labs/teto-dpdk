@@ -27,6 +27,7 @@ const EVENTS_CAPACITY: usize = 1024;
 /// How long a dropped stream may take to get its data acknowledged by the
 /// peer before it is closed regardless.
 const DROP_GRACE: Duration = Duration::from_secs(30);
+const DEADLINE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// How long the loop keeps running after the last socket is gone, so final
 /// FINs/ACKs (and anything F-Stack is batching) actually leave: stopping the
 /// loop tears F-Stack down and discards whatever it still holds.
@@ -57,7 +58,10 @@ pub(crate) struct TcpDriver {
     notified: Vec<u64>,
     events: Events,
     ready: Vec<Event>,
-    draining: Vec<(u64, Instant)>,
+    /// Dropped streams still delivering their data, with the deadline after
+    /// which they are aborted.
+    draining: HashMap<u64, Instant>,
+    next_deadline_check: Instant,
     idle_since: Option<Instant>,
 }
 
@@ -84,7 +88,8 @@ impl TcpDriver {
             notified: Vec::new(),
             events: Events::with_capacity(EVENTS_CAPACITY),
             ready: Vec::with_capacity(EVENTS_CAPACITY),
-            draining: Vec::new(),
+            draining: HashMap::new(),
+            next_deadline_check: Instant::now(),
             idle_since: None,
         })
     }
@@ -133,6 +138,11 @@ impl TcpDriver {
                 self.accept_ready();
                 continue;
             }
+            if ev.is_send_empty() {
+                // A dropped stream's data (and FIN) has been acknowledged.
+                self.close(ev.token(), None);
+                continue;
+            }
             if ev.is_readable() {
                 self.on_readable(ev.token());
             }
@@ -142,8 +152,9 @@ impl TcpDriver {
         }
         self.ready = ready;
 
-        if !self.draining.is_empty() {
-            self.check_draining();
+        if !self.draining.is_empty() && Instant::now() >= self.next_deadline_check {
+            self.next_deadline_check = Instant::now() + DEADLINE_CHECK_INTERVAL;
+            self.abort_overdue();
         }
 
         if self.listener.is_some() || !self.conns.is_empty() {
@@ -214,6 +225,7 @@ impl TcpDriver {
                 // The application dropped the listener: close the socket so
                 // new clients are refused instead of queued forever.
                 self.listener = None;
+                self.drop_unaccepted();
             }
             Some(false) => {
                 let _ = self.kq.deregister(listener);
@@ -231,9 +243,7 @@ impl TcpDriver {
         if st.dropped {
             st.rx.clear();
             st.rx_paused = false;
-            if !self.draining.iter().any(|(d, _)| *d == id) {
-                self.draining.push((id, Instant::now()));
-            }
+            self.draining.entry(id).or_insert_with(|| Instant::now() + DROP_GRACE);
         } else if st.rx_paused && st.rx.len() < RX_LOW {
             st.rx_paused = false;
         }
@@ -276,7 +286,7 @@ impl TcpDriver {
     /// its kqueue registrations.
     fn close(&mut self, id: u64, err: Option<ConnError>) {
         let Some(entry) = self.conns.remove(&id) else { return };
-        self.draining.retain(|(d, _)| *d != id);
+        self.draining.remove(&id);
         let mut st = entry.conn.lock();
         if let Some(e) = err {
             st.error.get_or_insert(e);
@@ -296,24 +306,17 @@ impl TcpDriver {
         }
     }
 
-    /// Close dropped streams once the peer has acknowledged everything (or
-    /// the grace period is over).
-    fn check_draining(&mut self) {
+    /// Abort dropped streams whose peer hasn't taken their data within
+    /// `DROP_GRACE`, so it sees a reset instead of a silent stall.
+    fn abort_overdue(&mut self) {
         let now = Instant::now();
-        let mut done = Vec::new();
-        for &(id, since) in &self.draining {
-            let Some(entry) = self.conns.get(&id) else {
-                done.push(id);
-                continue;
-            };
-            let st = entry.conn.lock();
-            let delivered = st.tx.is_empty() && st.wr_shutdown == WriteShutdown::Done && fully_acked(entry);
-            if delivered || now.duration_since(since) >= DROP_GRACE {
-                done.push(id);
+        let overdue: Vec<u64> =
+            self.draining.iter().filter(|(_, deadline)| now >= **deadline).map(|(id, _)| *id).collect();
+        for id in overdue {
+            self.draining.remove(&id);
+            if let Some(entry) = self.conns.remove(&id) {
+                entry.stream.abort();
             }
-        }
-        for id in done {
-            self.close(id, None);
         }
     }
 }
@@ -345,6 +348,10 @@ fn desired_interest(st: &ConnState) -> Interest {
     }
     if !st.tx.is_empty() {
         i = i.with(Interest::WRITABLE);
+    }
+    // A dropped stream that has sent FIN closes once everything is acked.
+    if st.dropped && st.tx.is_empty() && st.wr_shutdown == WriteShutdown::Done {
+        i = i.with(Interest::SEND_EMPTY);
     }
     i
 }
@@ -468,8 +475,8 @@ fn fully_acked(entry: &Entry) -> bool {
 }
 
 /// A dropped stream whose queued bytes are all with F-Stack: send FIN, and
-/// close once the peer has acknowledged everything. Until then it stays in
-/// `draining`, which `check_draining` re-examines every tick.
+/// close once the peer has acknowledged everything (signalled by the
+/// SEND_EMPTY event), or abort after `DROP_GRACE`.
 fn finish_dropped(kq: &Kqueue, entry: &mut Entry, st: &mut ConnState) -> Outcome {
     if st.wr_shutdown != WriteShutdown::Done {
         if entry.stream.shutdown(Shutdown::Write).is_err() {

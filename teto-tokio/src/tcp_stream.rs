@@ -28,7 +28,8 @@ use crate::conn::{Conn, ConnState, WriteShutdown, RX_LOW, TX_LIMIT};
 ///   reads and writes.
 /// - Dropping the stream closes the connection gracefully: buffered writes
 ///   are sent, then FIN, and the socket is closed once the peer has
-///   acknowledged everything (or after a 30 s grace period).
+///   acknowledged everything. A peer that doesn't take the data within 30 s
+///   gets a reset.
 pub struct TetoTcpStream {
     conn: Arc<Conn>,
     peer_addr: SocketAddr,

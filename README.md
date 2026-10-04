@@ -96,7 +96,7 @@ Behaviour worth knowing:
 
 - **Backpressure.** Each connection buffers at most 256 KiB in each direction between tokio and the F-Stack thread. `write` returns `Pending` when the send buffer is full; when your task falls behind on reads, the F-Stack thread stops reading the socket and TCP flow control slows the peer down. `flush` completes once F-Stack has accepted everything written.
 - **Half-close.** `read` returning `Ok(0)` means the peer shut down its write side; you can still write a reply. `shutdown()` flushes and sends FIN.
-- **Errors.** A reset connection fails reads and writes with `ConnectionReset`. Dropping a stream closes the connection after its buffered writes are handed to F-Stack (30 s grace period).
+- **Errors.** A reset connection fails reads and writes with `ConnectionReset`. Dropping a stream closes it gracefully: buffered writes are sent, then FIN, and the socket is released once the peer has acknowledged everything. A peer that doesn't take the data within 30 s gets a reset.
 - **Limits.** IPv4 only. One F-Stack instance per process, so one `TetoTcpListener` *or* one `TetoUdpSocket` per process. No outbound `connect` yet.
 
 ## Low-Level API (teto-dpdk)
