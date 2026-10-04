@@ -16,6 +16,20 @@ keywords = ["dpdk", "fstack", "networking", "userspace", "tcp"]
 categories = ["network-programming", "asynchronous", "external-ffi-bindings"]
 readme = "README.md"
 links = "fstack"
+# Explicit, so the package doesn't depend on the publisher's gitignore. The
+# Docker and CI tooling stays in the repository.
+include = [
+    "src/**",
+    "cxx_layer/**",
+    "build.rs",
+    "examples/**",
+    "config.ini",
+    "docs/*.md",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE",
+]
 
 [dependencies]
 cxx = "1.0.194"
