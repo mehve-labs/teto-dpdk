@@ -99,6 +99,33 @@ Behaviour worth knowing:
 - **tokio parity.** `into_split` (owned halves), `accept(&self)` from several tasks, `readable`/`writable`, `try_read`/`try_write`, `peek`, `set_nodelay`/`set_options` on a live connection (async, since options are applied on the F-Stack thread), `connect_from` a chosen local address, connected UDP (`connect`/`send`/`recv`), IPv4 and IPv6.
 - **Shutdown.** `TetoRuntime::shutdown().await` waits until every socket is closed and its data delivered, so call it at the end of `main` instead of exiting while data is in flight.
 
+## Local mode (no cross-thread hop)
+
+`teto_tokio::local::run` makes the calling thread both the F-Stack thread and a single-threaded tokio runtime. Tasks (`tokio::task::spawn_local`) use `LocalTcpListener`, `LocalTcpStream` and `LocalUdpSocket`, which call F-Stack directly: there are no buffers between threads, no locks, and one copy per direction. tokio's timers and sync primitives work as usual. The catch is that everything shares one thread, so CPU-heavy work stalls the network (use `spawn_blocking`).
+
+```rust
+use teto_dpdk::{FStackConfig, TcpSocketOptions};
+use teto_tokio::local::{self, LocalTcpListener};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn main() -> std::io::Result<()> {
+    local::run(FStackConfig::for_docker(), async {
+        let listener = LocalTcpListener::bind("0.0.0.0:8080".parse().unwrap(), &TcpSocketOptions::default())?;
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            tokio::task::spawn_local(async move {
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = stream.read(&mut buf).await {
+                    if stream.write_all(&buf[..n]).await.is_err() { break; }
+                }
+            });
+        }
+    })?
+}
+```
+
+Same Docker setup, same echo benchmark (`scripts/bench.sh`): p50 round trip 11.6 µs with `TetoRuntime` and 5.4 µs in local mode. The cross-thread hop roughly doubles latency. Real NICs will give different absolute numbers.
+
 ## Low-Level API (teto-dpdk)
 
 The low-level API gives you non-blocking F-Stack sockets and a kqueue, and runs your code once per iteration of F-Stack's poll loop. Everything is single-threaded: `FStack` and the sockets are `!Send`, and all calls happen inside `FStack::run`.

@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 RTT_COUNT=${RTT_COUNT:-5000}
 SECS=${SECS:-5}
 
-cargo build --release -p teto-tokio --example tcp_echo_async --example kernel_echo --example bench_client
+cargo build --release -p teto-tokio --example tcp_echo_async --example tcp_echo_local --example kernel_echo --example bench_client
 BIN=${CARGO_TARGET_DIR:-target}/release/examples
 
 wait_for() {
@@ -53,6 +53,14 @@ trap 'kill -9 $TETO 2>/dev/null || true' EXIT
 wait_for 10.0.0.1 8080
 run_client 10.0.0.1:8080
 kill -9 $TETO; wait $TETO 2>/dev/null || true
+
+echo "== teto-tokio local mode (F-Stack thread, no cross-thread hop) =="
+"$BIN/tcp_echo_local" > /tmp/teto-bench-local.log 2>&1 &
+LOCAL=$!
+trap 'kill -9 $LOCAL 2>/dev/null || true' EXIT
+wait_for 10.0.0.1 8080
+run_client 10.0.0.1:8080
+kill -9 $LOCAL; wait $LOCAL 2>/dev/null || true
 
 echo "== tokio::net (kernel loopback) =="
 "$BIN/kernel_echo" 127.0.0.1:8081 > /tmp/kernel-bench-server.log 2>&1 &

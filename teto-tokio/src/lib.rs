@@ -9,6 +9,7 @@
 
 mod conn;
 mod driver;
+pub mod local;
 mod runtime;
 mod tcp_listener;
 mod tcp_stream;

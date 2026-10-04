@@ -31,6 +31,10 @@ abort and soundness bugs in 0.2.0. **Breaking.**
   F-Stack thread; a failed bind leaves it usable; it exits when unused.
 - Outbound TCP: `TetoTcpStream::connect` / `connect_from`, `net::TcpStream::connect` / `connect_from` / `take_error`.
 - IPv6 (configure `addr6`/`prefix_len` per port).
+- Local mode, `teto_tokio::local::run`: async tasks on the F-Stack thread
+  with `LocalTcpListener`/`LocalTcpStream`/`LocalUdpSocket` calling F-Stack
+  directly (no cross-thread hop; about half the echo latency in Docker).
+- `event::Kqueue::register_oneshot`.
 - tokio parity: `TetoTcpStream::into_split` (+ `reunite`), `readable`/`writable`,
   `try_read`/`try_write`, `peek`, `set_nodelay`/`set_options` on live
   connections; `TetoUdpSocket::connect`/`send`/`recv`/`peer_addr`;

@@ -186,12 +186,14 @@ targets, and downstream applications would fail to link; CI builds
 - **One core.** One F-Stack thread with one NIC queue. Scaling across cores
   would follow F-Stack's process-per-lcore model with RSS; that's not designed
   yet.
-- **Cross-thread hop (teto-tokio).** Every operation crosses between tokio's
-  threads and the F-Stack thread, with a mutex and a wakeup each way. Whether
-  this costs much against a tuned kernel path is unmeasured: there are no
-  real-NIC benchmarks yet (`scripts/bench.sh` describes how to run them).
-  The low-level API avoids the hop; an async executor running on the F-Stack
-  thread would avoid it while keeping async/await.
+- **Cross-thread hop (`TetoRuntime`).** Every operation crosses between
+  tokio's threads and the F-Stack thread, with a mutex and a wakeup each way.
+  In the Docker setup that roughly doubles echo latency (p50 11.6 µs vs
+  5.4 µs). Local mode (`teto_tokio::local`) avoids it: a current-thread tokio
+  runtime runs *on* the F-Stack thread, driven from F-Stack's poll loop
+  (each iteration polls the kqueue, wakes tasks whose sockets are ready via
+  one-shot registrations, then lets ready tasks run), and its socket types
+  call F-Stack directly. The price is a single thread for everything.
 - **IPv6** needs an `addr6`/`prefix_len` for the port in `config.ini` (the
   Docker config has `fd00::1/64`). Each socket is one family: an IPv6
   listener doesn't accept IPv4 connections.

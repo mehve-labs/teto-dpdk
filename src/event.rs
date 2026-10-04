@@ -18,6 +18,7 @@ const EVFILT_WRITE: i16 = -2;
 const EVFILT_EMPTY: i16 = -13;
 const EV_ADD: u16 = 0x0001;
 const EV_DELETE: u16 = 0x0002;
+const EV_ONESHOT: u16 = 0x0010;
 const EV_ERROR: u16 = 0x4000;
 const EV_EOF: u16 = 0x8000;
 const ENOENT: i32 = 2;
@@ -190,25 +191,39 @@ impl Kqueue {
         self.set_filter(fd, EVFILT_EMPTY, token, interest.is_send_empty())
     }
 
+    /// Ask for one event per filter in `interest`, tagged with `token`: each
+    /// filter is removed after it reports once. Filters not in `interest` are
+    /// left as they are. Suits "wake me once when this socket is ready"
+    /// waiting: idle sockets cost nothing per poll.
+    pub fn register_oneshot(&self, source: &impl Source, token: u64, interest: Interest) -> io::Result<()> {
+        let fd = source.fd()?;
+        for (filter, on) in [
+            (EVFILT_READ, interest.is_readable()),
+            (EVFILT_WRITE, interest.is_writable()),
+            (EVFILT_EMPTY, interest.is_send_empty()),
+        ] {
+            if on {
+                self.change(fd, filter, EV_ADD | EV_ONESHOT, token)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Remove all interest for `source`.
     pub fn deregister(&self, source: &impl Source) -> io::Result<()> {
         self.register(source, 0, Interest::NONE)
     }
 
     fn set_filter(&self, fd: i32, filter: i16, token: u64, on: bool) -> io::Result<()> {
-        let change = ffi::KEvent {
-            ident: fd as u64,
-            filter,
-            flags: if on { EV_ADD } else { EV_DELETE },
-            fflags: 0,
-            data: 0,
-            udata: token,
-        };
-        match cvt32(ffi::kq_change(self.fd.get()?, &change)) {
-            Ok(_) => Ok(()),
+        match self.change(fd, filter, if on { EV_ADD } else { EV_DELETE }, token) {
             Err(e) if !on && e.raw_os_error() == Some(ENOENT) => Ok(()),
-            Err(e) => Err(e),
+            other => other,
         }
+    }
+
+    fn change(&self, fd: i32, filter: i16, flags: u16, token: u64) -> io::Result<()> {
+        let change = ffi::KEvent { ident: fd as u64, filter, flags, fflags: 0, data: 0, udata: token };
+        cvt32(ffi::kq_change(self.fd.get()?, &change)).map(drop)
     }
 
     /// Collect ready events without blocking. Returns the number of events.
