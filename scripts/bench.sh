@@ -5,7 +5,7 @@
 #   scripts/bench.sh
 #
 # What the Docker numbers mean: very little. The F-Stack path goes through the
-# DPDK TAP driver (a kernel tap device read/written with syscalls) and, on
+# veth pair via DPDK's af_packet driver (raw sockets, i.e. syscalls) and, on
 # Apple Silicon, x86 emulation; the kernel baseline goes through loopback.
 # Use it to check the harness runs and to catch gross regressions only.
 #
@@ -46,7 +46,7 @@ run_client() {
     "$BIN/bench_client" "$1" throughput "$SECS" 8 16384
 }
 
-echo "== teto-tokio (F-Stack via TAP) =="
+echo "== teto-tokio (F-Stack via veth/af_packet) =="
 "$BIN/tcp_echo_async" > /tmp/teto-bench-server.log 2>&1 &
 TETO=$!
 trap 'kill -9 $TETO 2>/dev/null || true' EXIT

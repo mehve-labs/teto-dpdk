@@ -12,7 +12,7 @@ use teto_dpdk::{FStack, FStackConfig, TcpSocketOptions};
 
 fn config() -> FStackConfig {
     FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/config.ini"))
-        .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
         .with_eal_arg("--no-pci")
         .with_eal_arg("--iova-mode=va")
 }

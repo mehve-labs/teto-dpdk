@@ -21,18 +21,15 @@ Two crates are provided:
 ## Architecture
 
 ```
-Kernel                              Userspace (DPDK)
-┌────────────────┐                  ┌──────────────────────────────┐
-│  sender        │                  │  DPDK TAP PMD (port 0)       │
-│  (nc/app)      │    TAP fd        │  MAC: aa:bb:cc:dd:ee:ff      │
-│      │         │                  │         │                    │
-│      ▼         │                  │  F-Stack (FreeBSD TCP/IP)    │
-│  dtap0 ────────┼──────────────────▶  ff_socket / ff_recvfrom    │
-│  10.0.0.2      │◀─────────────────┼─ ff_sendto (echo reply)     │
-│  MAC: 02:00:*  │                  │         │                    │
-└────────────────┘                  │  Rust poll-loop tick (cxx)   │
-                                    └──────────────────────────────┘
-  MACs must differ — FreeBSD drops frames with src MAC == own MAC.
+ In production, DPDK drives a real NIC:      In Docker (no NIC), a veth pair stands in:
+
+   your app                                   kernel side            F-Stack side
+   teto-tokio / teto-dpdk                     ┌──────────────┐       ┌──────────────────────────┐
+   F-Stack (FreeBSD TCP/IP, user space)       │ client (nc,  │       │ your app (teto)          │
+   DPDK poll-mode driver                      │ tests)       │       │ F-Stack  10.0.0.1        │
+   NIC  ◀── wire ──▶ other hosts              │ teto0        │◀═veth═▶ teto0-dpdk               │
+                                              │ 10.0.0.2     │       │ DPDK af_packet driver    │
+                                              └──────────────┘       └──────────────────────────┘
 ```
 
 The Rust layer interfaces with F-Stack through a C++ wrapper (`cxx_layer/`) using the [cxx](https://cxx.rs) bridge. The C++ wrapper is a thin layer over F-Stack's `ff_*` calls that returns `-errno` on failure; the socket, kqueue and lifecycle logic is in Rust.
@@ -148,7 +145,7 @@ Rules the API enforces:
 F-Stack is configured via `config.ini`. The `FStackConfig` builder generates the correct arguments for different environments:
 
 ```rust
-// Docker / TAP device (development)
+// Docker: F-Stack on the veth pair created by entrypoint.sh (development)
 let cfg = FStackConfig::for_docker();
 
 // Bare metal / AWS with a real NIC bound via VFIO
@@ -159,7 +156,7 @@ let cfg = FStackConfig::from_env()?;
 
 // Custom
 let cfg = FStackConfig::new("/etc/teto/config.ini")
-    .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+    .with_eal_arg("--vdev=net_af_packet0,iface=eth1")
     .with_eal_arg("--no-pci");
 ```
 
@@ -202,9 +199,9 @@ teto-dpdk/                          (Cargo workspace root)
 ├── scripts/bench.sh        # teto vs kernel echo benchmark
 ├── build.rs                # Builds the cxx layer; emits F-Stack/DPDK link settings that reach dependents
 ├── ci/downstream/          # Out-of-workspace crate CI builds to check downstream linking
-├── config.ini              # F-Stack / DPDK configuration (Docker/TAP)
+├── config.ini              # F-Stack / DPDK configuration (Docker defaults)
 ├── Dockerfile              # Builds DPDK + F-Stack from source
-├── entrypoint.sh           # Configures the kernel-side TAP device
+├── entrypoint.sh           # Creates the veth pair F-Stack uses in Docker
 └── docs/
     ├── architecture.md     # Threads, buffers, lifecycles, linking, limits
     ├── testing-docker.md   # Docker testing guide and diagnostics
@@ -214,17 +211,17 @@ teto-dpdk/                          (Cargo workspace root)
 
 ## How It Works
 
-1. **DPDK TAP PMD** creates a virtual network device pair: a DPDK ethdev (polled in userspace) and a kernel-visible TAP interface (`dtap0`).
+1. **`entrypoint.sh`** creates a veth pair once, when the container starts: `teto0` (kernel side, `10.0.0.2/24`) and `teto0-dpdk` (no IP; for DPDK). It also turns off TX checksum offload on `teto0`, so the kernel sends complete checksums.
 
-2. **F-Stack** runs a FreeBSD TCP/IP stack on top of the DPDK ethdev. It processes Ethernet frames, handles ARP, and delivers payload to `ff_socket` descriptors.
+2. **DPDK's `af_packet` driver** attaches to `teto0-dpdk` and stands in for a NIC. On real hardware a poll-mode NIC driver takes its place.
 
-3. **The entrypoint** configures the kernel side of `dtap0` with IP `10.0.0.2/24` and a **different MAC address** from the DPDK side. The distinct MAC is critical: FreeBSD's `ether_input` drops frames whose source MAC matches the interface MAC (anti-loop), so if both sides of the TAP share the same MAC, F-Stack silently drops all ARP replies.
+3. **F-Stack** runs a FreeBSD TCP/IP stack on top of that DPDK port, as `10.0.0.1`. It handles ARP and delivers payload to its sockets. Both ends of the veth pair have their own MAC, so ARP just works.
 
 4. **`cargo run`** initializes F-Stack, creates a socket bound to `0.0.0.0:8080`, and enters the DPDK poll loop, calling your code once per iteration.
 
 ## Testing
 
-The integration tests need F-Stack, so they run in the Docker environment (each test binary starts its own F-Stack instance on the TAP device; cargo runs them one at a time):
+The integration tests need F-Stack, so they run in the Docker environment (each test binary starts its own F-Stack instance on the veth pair; cargo runs them one at a time):
 
 ```bash
 docker run --privileged -it -v $(pwd):/app teto-dpdk bash
@@ -235,7 +232,7 @@ They cover the failure modes that matter for a network stack: half-close, connec
 
 ## Performance
 
-No performance numbers are published yet. `scripts/bench.sh` runs the same echo benchmark (RTT percentiles and throughput) against teto-tokio and a `tokio::net` baseline. Numbers from the Docker/TAP setup mostly measure the TAP device and, on Apple Silicon, x86 emulation. A meaningful comparison needs two hosts with real NICs; the script header describes how to run one.
+No performance numbers are published yet. `scripts/bench.sh` runs the same echo benchmark (RTT percentiles and throughput) against teto-tokio and a `tokio::net` baseline. Numbers from the Docker setup mostly measure the veth pair and `af_packet` driver (syscalls per packet) and, on Apple Silicon, x86 emulation. A meaningful comparison needs two hosts with real NICs; the script header describes how to run one.
 
 The shipped `config.ini` sets `pkt_tx_delay=0`, so F-Stack transmits immediately instead of batching for up to 100 µs (its own default). In the Docker setup that took echo p50 RTT from 200 µs to 36 µs, with no measurable throughput change. On a real NIC at high packet rates, batching may matter for bulk throughput, so raise it toward 100 for throughput-bound workloads.
 

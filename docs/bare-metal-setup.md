@@ -1,8 +1,8 @@
 # Bare Metal and AWS Setup
 
-This guide covers running teto-dpdk on a physical machine or a cloud VM with an SR-IOV NIC. Unlike the Docker TAP setup, here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (with SR-IOV) the hypervisor data path.
+This guide covers running teto-dpdk on a physical machine or a cloud VM with an SR-IOV NIC. Unlike the Docker setup (DPDK's `af_packet` driver on a veth pair), here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (with SR-IOV) the hypervisor data path.
 
-> **Status:** the project's tests run in Docker over a TAP device. This guide follows the standard DPDK and F-Stack setup but hasn't been validated end to end on real hardware with the current release. Please report anything that doesn't work. teto builds for x86_64 Linux only.
+> **Status:** the project's tests run in Docker, over a veth pair. This guide follows the standard DPDK and F-Stack setup but hasn't been validated end to end on real hardware with the current release. Please report anything that doesn't work. teto builds for x86_64 Linux only.
 
 ---
 
@@ -165,11 +165,7 @@ Then set `lcore_mask=2` in config.ini (`2` in hex = bit 1 = core 1).
 
 ## 5. Update config.ini
 
-Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings:
-
-- `no_huge=1` and `memory=512`: use the hugepages from step 1;
-- `tx_csum_offoad_skip=1` (sic, F-Stack's spelling): let the NIC offload checksums;
-- `net.inet.udp.checksum=0` under `[freebsd.sysctl]`: real NICs deliver correct UDP checksums.
+Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings, `no_huge=1` and `memory=512`, and use the hugepages from step 1 instead.
 
 Then point DPDK at the NIC. Comments must be on their own lines: F-Stack's INI parser doesn't strip `#` comments that follow a value.
 
@@ -205,7 +201,7 @@ See [config-reference.md](config-reference.md) for all available keys.
 
 ## 6. Select the bare-metal profile
 
-Nothing in the code changes between Docker and bare metal. The Docker profile (`FStackConfig::for_docker()`) adds the TAP device's EAL arguments (`--vdev=net_tap0,...`, `--no-pci`, `--iova-mode=va`); the bare-metal profile adds none, and DPDK finds the NIC through the `allow` key in `config.ini`.
+Nothing in the code changes between Docker and bare metal. The Docker profile (`FStackConfig::for_docker()`) adds the veth setup's EAL arguments (`--vdev=net_af_packet0,iface=teto0-dpdk`, `--no-pci`, `--iova-mode=va`); the bare-metal profile adds none, and DPDK finds the NIC through the `allow` key in `config.ini`.
 
 In your own code:
 
@@ -219,11 +215,11 @@ let rt = TetoRuntime::start(cfg).await?;
 
 The examples pick the profile from the environment (`FStackConfig::from_env()`): `TETO_PROFILE=bare-metal` selects the bare-metal profile, and `TETO_CONFIG` names the config file (default: `config.ini` in the working directory).
 
-Don't run `entrypoint.sh` on bare metal: there's no TAP device to configure.
+Don't run `entrypoint.sh` on bare metal: it creates the Docker veth pair, which you don't need.
 
 ### In a container
 
-The bare-metal setup also works inside a container, without the Docker/TAP workarounds. The host does steps 1–4 (hugepages, IOMMU, binding the NIC to `vfio-pci`). The container needs the VFIO devices, the hugepage mount, and permission to lock memory:
+The bare-metal setup also works inside a container, without the Docker veth setup. The host does steps 1–4 (hugepages, IOMMU, binding the NIC to `vfio-pci`). The container needs the VFIO devices, the hugepage mount, and permission to lock memory:
 
 ```bash
 docker run --rm -it \

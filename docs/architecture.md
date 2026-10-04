@@ -18,7 +18,7 @@ the driver or the build script.
                 throws (→ Err), one trampoline calls Rust each loop iteration
  ─────────────────────────────────────────────────────────────────────────
    F-Stack      FreeBSD TCP/IP stack in user space (libfstack.a)
-   DPDK         poll-mode NIC drivers (or the TAP PMD in Docker)
+   DPDK         poll-mode NIC drivers (in Docker: af_packet on a veth pair)
 ```
 
 You can use either crate on its own terms:
@@ -202,8 +202,8 @@ targets, and downstream applications would fail to link; CI builds
 ## Testing
 
 Everything except docs builds needs F-Stack, so tests run in the Docker image
-(privileged, with `entrypoint.sh` configuring the kernel side of the TAP
-device). Each test binary starts its own F-Stack instance; cargo runs them one
+(privileged; `entrypoint.sh` creates the veth pair `teto0` ⇄ `teto0-dpdk`
+that F-Stack attaches to with DPDK's `af_packet` driver). Each test binary starts its own F-Stack instance; cargo runs them one
 after another. `scripts/ci-test.sh` is what CI runs:
 
 - **Behaviour:** `teto-tokio/tests/{tcp,udp,runtime}.rs` and
@@ -211,7 +211,7 @@ after another. `scripts/ci-test.sh` is what CI runs:
   both directions, drop delivery, multiple sockets, outbound connect, runtime
   exit.
 - **Init and failure paths:** `tests/{init_bad_config,init_eal_overflow,run_panic}.rs`.
-- **Network faults:** `teto-tokio/tests/faults.rs` impairs the TAP link with `tc`
+- **Network faults:** `teto-tokio/tests/faults.rs` impairs the veth link with `tc`
   (loss, delay, reordering, outages, silent peers).
 - **Scale:** `teto-tokio/tests/scale.rs` (1000 concurrent connections, churn
   with a memory check; `TETO_SOAK_SECS` for long soaks).

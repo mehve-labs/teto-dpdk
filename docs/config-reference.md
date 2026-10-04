@@ -30,7 +30,7 @@ Controls DPDK EAL (Environment Abstraction Layer) initialization.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `port_list` | int list | — | Comma/range list of DPDK port IDs that F-Stack manages (e.g. `0`, `0,1`, `0-3`). **Required.** Must have a matching `[portN]` section for each ID. |
-| `allow` | PCI addr | — | PCI address of the NIC to bind (bare metal / AWS SR-IOV). Equivalent to DPDK `--allow`. Omit when using a TAP vdev. |
+| `allow` | PCI addr | — | PCI address of the NIC to bind (bare metal / AWS SR-IOV). Equivalent to DPDK `--allow`. Omit when using a virtual device (Docker's `af_packet` vdev). |
 | `promiscuous` | 0/1 | `1` | Put the NIC in promiscuous mode (accept all Ethernet frames). |
 | `numa_on` | 0/1 | `1` | Enable NUMA-aware memory allocation. Set to `0` in Docker or single-socket machines. |
 
@@ -38,7 +38,7 @@ Controls DPDK EAL (Environment Abstraction Layer) initialization.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `tx_csum_offoad_skip` | 0/1 | `0` | Skip TX checksum offloading. **Set to `1` for TAP devices**, which have no hardware offload. |
+| `tx_csum_offoad_skip` | 0/1 | `0` | Skip TX checksum offloading (compute checksums in software). F-Stack already falls back to software when the device can't offload, so this is rarely needed. |
 | `tso` | 0/1 | `0` | TCP Segmentation Offload. Only enable if your NIC supports it. |
 | `vlan_strip` | 0/1 | `1` | Strip VLAN tags in hardware on RX. |
 | `vlan_filter` | int list | — | VLAN IDs to enable filtering for (comma/range). When set, `[vlanN]` sections override `[portN]` IP config entirely. |
@@ -90,7 +90,7 @@ One section per port ID in `port_list` (e.g. `[port0]`, `[port1]`). F-Stack crea
 | `addr` | IPv4 | IP address for the F-Stack interface. |
 | `netmask` | IPv4 | Subnet mask. |
 | `broadcast` | IPv4 | Broadcast address. |
-| `gateway` | IPv4 | Default gateway. For TAP: the kernel-side IP. For bare metal: your router. |
+| `gateway` | IPv4 | Default gateway. In Docker: the kernel side of the veth pair (`10.0.0.2`). For bare metal: your router. |
 
 ### Optional
 
@@ -118,7 +118,7 @@ One section per port ID in `port_list` (e.g. `[port0]`, `[port1]`). F-Stack crea
 
 Configures a software virtual device (virtio-user or vhost-user). Requires `nb_vdev` ≥ N+1 in `[dpdk]`. Index starts at 0.
 
-> Note: teto-dpdk injects the TAP vdev directly as an EAL argument (`--vdev=net_tap0,iface=dtap0`) and does not use this section. Use `[vdevN]` if you switch to F-Stack's built-in vdev config system.
+> Note: teto-dpdk's Docker profile passes its virtual device directly as an EAL argument (`--vdev=net_af_packet0,iface=teto0-dpdk`) and does not use this section. Use `[vdevN]` if you switch to F-Stack's built-in vdev config system.
 
 | Key | Required | Description |
 |-----|----------|-------------|
@@ -230,7 +230,7 @@ Passed to FreeBSD's sysctl interface after the kernel starts. Any valid FreeBSD 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `net.inet.udp.checksum` | `1` | Validate UDP checksums on RX. Set to `0` for TAP setups. Restore to `1` on bare metal. |
+| `net.inet.udp.checksum` | `1` | Validate UDP checksums on RX. Leave at `1`; the Docker veth setup sends complete checksums. |
 | `net.inet.udp.blackhole` | `1` | Silently drop UDP packets to closed ports (no ICMP unreachable). |
 | `net.inet.ip.redirect` | `0` | Send ICMP redirects. |
 | `net.inet.ip.forwarding` | `0` | Act as an IP router. |
@@ -296,6 +296,6 @@ F-Stack's parser is strict. These produce no error but have no effect:
 | Key | Why ignored | Correct approach |
 |-----|-------------|-----------------|
 | `no-huge=1` | Hyphen — parser expects `no_huge` | Use `no_huge=1` |
-| `vdev=net_tap0,...` | Not a `[dpdk]` key; vdevs use `[vdevN]` + `nb_vdev` | Inject via EAL arg in code, or use `[vdev0]` + `nb_vdev=1` |
+| `vdev=net_af_packet0,...` | Not a `[dpdk]` key; vdevs use `[vdevN]` + `nb_vdev` | Inject via EAL arg in code, or use `[vdev0]` + `nb_vdev=1` |
 | `iova-mode=va` | No handler — not a recognised F-Stack config key | Inject as EAL arg: `--iova-mode=va` |
 | `port_id=N` in `[portN]` | Not a recognised port key — port ID comes from the section name | Remove it |

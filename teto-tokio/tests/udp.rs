@@ -12,7 +12,7 @@ use teto_tokio::{TetoRuntime, TetoUdpSocket};
 
 fn config() -> FStackConfig {
     FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
-        .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
         .with_eal_arg("--no-pci")
         .with_eal_arg("--iova-mode=va")
 }
@@ -140,9 +140,19 @@ fn udp_suite() {
         assert_eq!(got, LAST, "datagrams lost when the socket was dropped");
 
         let deadline = Instant::now() + Duration::from_secs(15);
-        while std::path::Path::new("/sys/class/net/dtap0").exists() {
+        while fstack_thread_running() {
             assert!(Instant::now() < deadline, "F-Stack thread didn't exit");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
+}
+
+/// Whether this process still has F-Stack's thread (`TetoRuntime` names it
+/// "fstack"). It exits after teardown, which is how these tests observe that
+/// the runtime stopped.
+fn fstack_thread_running() -> bool {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+        .any(|comm| comm.trim() == "fstack")
 }

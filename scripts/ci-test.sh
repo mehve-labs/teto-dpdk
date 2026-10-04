@@ -1,7 +1,7 @@
 #!/bin/bash
 # Lint, build and run the integration suite. Runs inside the project's Docker
-# image (privileged, started through entrypoint.sh so the TAP device gets
-# configured), from the repository root:
+# image (privileged, started through entrypoint.sh, which creates the veth
+# pair F-Stack uses), from the repository root:
 #
 #   docker build -t teto-dpdk .
 #   docker run --rm --privileged -v "$PWD":/app teto-dpdk scripts/ci-test.sh
@@ -19,7 +19,7 @@ CARGO_TARGET_DIR=target/msrv cargo "+$MSRV" build --workspace --all-targets
 echo "::endgroup::"
 
 # Each integration test binary starts its own F-Stack instance on the shared
-# TAP device; cargo runs test binaries one after another.
+# veth pair; cargo runs test binaries one after another.
 echo "::group::test"
 cargo test --workspace
 echo "::endgroup::"

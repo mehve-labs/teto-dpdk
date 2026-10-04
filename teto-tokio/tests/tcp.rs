@@ -3,7 +3,7 @@
 //! Requires the project's Docker environment (privileged container running
 //! `entrypoint.sh`, which configures the kernel side of the TAP device). The
 //! server runs on F-Stack at 10.0.0.1; clients are kernel sockets reaching it
-//! through dtap0. F-Stack can be initialised once per process, so all
+//! through the veth pair (teto0 <-> teto0-dpdk). F-Stack can be initialised once per process, so all
 //! scenarios share one listener inside a single test.
 
 use std::io::{ErrorKind, Read, Write};
@@ -20,7 +20,7 @@ const T: Duration = Duration::from_secs(10);
 
 fn config() -> FStackConfig {
     FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
-        .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
         .with_eal_arg("--no-pci")
         .with_eal_arg("--iova-mode=va")
 }
@@ -40,8 +40,8 @@ fn connect() -> StdTcpStream {
     s
 }
 
-/// The kernel side of dtap0 is configured asynchronously after F-Stack
-/// creates it; retry until a connection gets through.
+/// Retry until a connection gets through (F-Stack is reachable as soon as
+/// its interface is up; this only absorbs startup and ARP).
 async fn wait_until_reachable(listener: &mut TetoTcpListener) {
     let client = tokio::task::spawn_blocking(|| {
         let deadline = Instant::now() + Duration::from_secs(90);
@@ -392,11 +392,20 @@ async fn dropped_listener_refuses(mut listener: TetoTcpListener) {
     wait_for_fstack_exit().await;
 }
 
-/// F-Stack's teardown (`rte_eal_cleanup`) removes the TAP device.
 async fn wait_for_fstack_exit() {
     let deadline = Instant::now() + Duration::from_secs(15);
-    while std::path::Path::new("/sys/class/net/dtap0").exists() {
+    while fstack_thread_running() {
         assert!(Instant::now() < deadline, "F-Stack thread didn't exit");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Whether this process still has F-Stack's thread (`TetoRuntime` names it
+/// "fstack"). It exits after teardown, which is how these tests observe that
+/// the runtime stopped.
+fn fstack_thread_running() -> bool {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+        .any(|comm| comm.trim() == "fstack")
 }

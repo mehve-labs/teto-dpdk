@@ -1,10 +1,11 @@
 //! Network fault injection: packet loss, outages and peers that vanish.
 //!
-//! Faults are applied to the kernel side of the TAP device with `tc` (needs
-//! root, which the Docker test environment has):
-//! - egress `netem` on dtap0 impairs kernel -> F-Stack packets;
-//! - an ingress `gact` filter drops F-Stack -> kernel packets, which is what
-//!   exercises F-Stack's own retransmission and keepalive timers.
+//! Faults are applied with `tc` to `teto0`, the kernel end of the veth pair
+//! F-Stack is attached to (needs root, which the Docker test environment
+//! has):
+//! - egress `netem` on teto0 impairs kernel -> F-Stack packets;
+//! - an ingress drop filter on teto0 impairs F-Stack -> kernel packets, which
+//!   is what exercises F-Stack's own retransmission and keepalive timers.
 //!
 //! See tests/tcp.rs for the environment these tests need.
 
@@ -18,11 +19,11 @@ use teto_tokio::{TetoRuntime, TetoTcpListener, TetoTcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
-const DEV: &str = "dtap0";
+const DEV: &str = "teto0";
 
 fn config() -> FStackConfig {
     FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
-        .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
         .with_eal_arg("--no-pci")
         .with_eal_arg("--iova-mode=va")
         .capture_init_output(true)
@@ -41,17 +42,10 @@ fn tc(args: &[&str]) {
     assert!(out.status.success(), "tc {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// Impairments on dtap0, removed when dropped (also if a test panics).
-///
-/// DPDK's TAP driver owns dtap0's qdiscs (a `multiq` root with class `1:1`
-/// and an `ingress` qdisc), so the impairments are added *inside* that
-/// layout: netem as the child qdisc of class `1:1` (healed by swapping in a
-/// plain `pfifo`; a class left without a child would drop everything), and
-/// one drop filter at a fixed priority in the ingress qdisc.
+/// Impairments on teto0, removed when dropped (also if a test panics).
+/// teto0 is ours (created by entrypoint.sh), so its root and ingress qdiscs
+/// can simply be replaced and deleted.
 struct Faults;
-
-const NETEM_PARENT: &str = "1:1";
-const FILTER_PREF: &str = "7";
 
 impl Faults {
     fn new() -> Self {
@@ -60,30 +54,24 @@ impl Faults {
     }
 
     fn clear() {
-        // Replace rather than delete: a multiq class left without a child
-        // qdisc drops everything.
-        let _ = Command::new("tc")
-            .args(["qdisc", "replace", "dev", DEV, "parent", NETEM_PARENT, "pfifo"])
-            .output();
-        let _ = Command::new("tc").args(["filter", "del", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]).output();
+        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "root"]).output();
+        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "ingress"]).output();
     }
 
     /// Impair kernel -> F-Stack packets (`netem` options, e.g. `loss 3%`).
     fn to_fstack(&self, netem: &str) {
-        let mut args = vec!["qdisc", "replace", "dev", DEV, "parent", NETEM_PARENT, "netem"];
+        let mut args = vec!["qdisc", "replace", "dev", DEV, "root", "netem"];
         args.extend(netem.split_whitespace());
         tc(&args);
     }
 
     /// Drop one in `one_in` F-Stack -> kernel packets (`1` drops everything).
     fn drop_from_fstack(&self, one_in: u32) {
-        let _ = Command::new("tc").args(["filter", "del", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]).output();
-        // The TAP driver normally created the ingress qdisc already.
-        let _ = Command::new("tc").args(["qdisc", "add", "dev", DEV, "ingress"]).output();
+        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "ingress"]).output();
+        tc(&["qdisc", "add", "dev", DEV, "ingress"]);
         let one_in = one_in.to_string();
         let mut args = vec![
-            "filter", "add", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF, "protocol", "ip", "u32", "match",
-            "u32", "0", "0",
+            "filter", "add", "dev", DEV, "parent", "ffff:", "protocol", "ip", "u32", "match", "u32", "0", "0",
         ];
         if one_in == "1" {
             args.extend(["action", "drop"]);
@@ -113,7 +101,7 @@ impl Faults {
             .split("qdisc ")
             .find(|block| block.starts_with("netem"))
             .map_or(0, sum_dropped);
-        let filter = sum_dropped(&run(&["-s", "filter", "show", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]));
+        let filter = sum_dropped(&run(&["-s", "filter", "show", "dev", DEV, "parent", "ffff:"]));
         (netem, filter)
     }
 }

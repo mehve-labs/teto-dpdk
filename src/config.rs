@@ -36,7 +36,7 @@ fn default_config_file() -> String {
 /// ```rust
 /// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::new("config.ini")
-///     .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+///     .with_eal_arg("--vdev=net_af_packet0,iface=eth1")
 ///     .with_eal_arg("--no-pci");
 /// ```
 pub struct FStackConfig {
@@ -95,26 +95,21 @@ impl FStackConfig {
     // Pre-built profiles
     // ------------------------------------------------------------------
 
-    /// Docker / TAP device profile. Reads `$TETO_CONFIG`, or `config.ini` in
-    /// the working directory.
+    /// Docker profile (no NIC). Reads `$TETO_CONFIG`, or `config.ini` in the
+    /// working directory.
     ///
-    /// Injects the three EAL arguments that are required when running DPDK
-    /// inside a container with a TAP virtual interface instead of a real NIC:
+    /// F-Stack attaches to one end of a veth pair that the project's
+    /// `entrypoint.sh` creates (`teto0-dpdk`); the kernel uses the other end
+    /// (`teto0`, 10.0.0.2). EAL arguments:
     ///
-    /// - `--vdev=net_tap0,iface=dtap0,mac=fixed`  — create a TAP-backed DPDK
-    ///   port tied to the kernel interface `dtap0`; `mac=fixed` makes the MAC
-    ///   deterministic so that it is stable across restarts. The kernel side of
-    ///   the TAP is automatically assigned a *different* MAC by `entrypoint.sh`
-    ///   (derived from the DPDK MAC by incrementing the last octet). The two
-    ///   MACs must differ: FreeBSD's `ether_input` drops frames whose source
-    ///   MAC matches the interface MAC (anti-loop protection).
-    /// - `--no-pci`  — skip PCI bus scan; without this DPDK could claim a PCI
-    ///   device and push the TAP device to port 1, breaking `port_list=0`.
-    /// - `--iova-mode=va`  — force Virtual Address IOVA mode, required in
-    ///   containers / WSL2 where physical address access is unavailable.
+    /// - `--vdev=net_af_packet0,iface=teto0-dpdk` — DPDK's `af_packet` driver
+    ///   on the veth end, in place of a NIC;
+    /// - `--no-pci` — don't scan PCI, so the virtual device is port 0;
+    /// - `--iova-mode=va` — virtual-address IOVA, required in containers where
+    ///   physical addresses aren't available.
     pub fn for_docker() -> Self {
         Self::new(default_config_file())
-            .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+            .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
             .with_eal_arg("--no-pci")
             .with_eal_arg("--iova-mode=va")
     }

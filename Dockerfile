@@ -37,7 +37,8 @@ WORKDIR /opt
 # delayed ACKs, keepalives and TCP retransmission never fire (a lost packet
 # hangs the connection). Older releases are no good either: the DPDK bundled
 # with 1.21.6 has a net_tap RX checksum bug that drops every TCP packet.
-# When bumping, re-run the integration tests (TCP over TAP, timers).
+# When bumping, re-run the integration tests (including tests/faults.rs, which
+# exercises the timers).
 ARG FSTACK_REF=v1.25
 ARG FSTACK_COMMIT=761639943bdda33103aa98241ca6a3079f1c1b7e
 RUN git clone --recurse-submodules --depth 1 --branch ${FSTACK_REF} https://github.com/F-Stack/f-stack.git && \
