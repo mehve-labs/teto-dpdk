@@ -48,7 +48,7 @@ Controls DPDK EAL (Environment Abstraction Layer) initialization.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `idle_sleep` | int (µs) | `0` | Sleep this many microseconds when no packets arrive. `0` = busy poll (max throughput, burns a full core). Increase to reduce CPU usage at the cost of latency. |
-| `pkt_tx_delay` | int (µs) | `100` | Delay before flushing a TX burst smaller than 32 packets. `0` = send immediately. Capped at 100. |
+| `pkt_tx_delay` | int (µs) | `100` (teto's `config.ini`: `0`) | Delay before flushing a TX burst smaller than 32 packets. `0` = send immediately. Capped at 100. Batching helps bulk throughput but adds up to this much latency to every reply. |
 
 ### RSS
 

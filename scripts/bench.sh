@@ -18,8 +18,9 @@
 #   cargo run --release -p teto-tokio --example bench_client -- <server>:<port> rtt 100000 64
 #   cargo run --release -p teto-tokio --example bench_client -- <server>:<port> throughput 30 16 16384
 # Compare p50/p99 RTT and throughput. Repeat a few times; pin CPUs.
-# For latency runs set pkt_tx_delay=0 in config.ini ([dpdk]); the default
-# 100 µs TX batching delay otherwise dominates round-trip times.
+# The shipped config.ini uses pkt_tx_delay=0 (send immediately); F-Stack's
+# default of 100 µs batching dominates round-trip times. For throughput runs,
+# also try 100.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

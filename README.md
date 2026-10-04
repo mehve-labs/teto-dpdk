@@ -230,7 +230,7 @@ They cover the failure modes that matter for a network stack: half-close, connec
 
 No performance numbers are published yet. `scripts/bench.sh` runs the same echo benchmark (RTT percentiles and throughput) against teto-tokio and a `tokio::net` baseline. Numbers from the Docker/TAP setup mostly measure the TAP device and, on Apple Silicon, x86 emulation. A meaningful comparison needs two hosts with real NICs; the script header describes how to run one.
 
-For latency, set `pkt_tx_delay=0` in `config.ini`'s `[dpdk]` section. By default F-Stack holds outgoing packets for up to 100 µs to batch them, and that delay dominates echo round trips: in the Docker setup, p50 RTT went from 200 µs to 35 µs.
+The shipped `config.ini` sets `pkt_tx_delay=0`, so F-Stack transmits immediately instead of batching for up to 100 µs (its own default). In the Docker setup that took echo p50 RTT from 200 µs to 36 µs, with no measurable throughput change. On a real NIC at high packet rates, batching may matter for bulk throughput, so raise it toward 100 for throughput-bound workloads.
 
 The data path copies each payload once between F-Stack and the per-connection buffer, and once between that buffer and your buffer (the same count as a kernel socket read). There are no per-message allocations on the TCP path. UDP datagrams are carved out of 1 MiB blocks.
 
