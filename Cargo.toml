@@ -23,6 +23,7 @@ include = [
     "cxx_layer/**",
     "build.rs",
     "examples/**",
+    "tests/**",
     "config.ini",
     "docs/*.md",
     "README.md",
