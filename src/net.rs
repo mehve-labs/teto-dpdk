@@ -166,6 +166,8 @@ impl TcpStream {
 
     /// Like [`connect`](Self::connect), from the local address `local`
     /// (port 0 picks a port). `local` and `addr` must be the same family.
+    /// With several F-Stack processes, the port isn't chosen to match this
+    /// process's RSS queue (see `docs/architecture.md`).
     pub fn connect_from(
         fs: &FStack,
         local: SocketAddr,

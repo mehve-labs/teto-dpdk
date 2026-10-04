@@ -74,6 +74,8 @@ impl TetoTcpStream {
     /// Like [`connect`](Self::connect), from the local address `local` (port 0
     /// picks a free port). `local` and `addr` must be the same address
     /// family; set [`TcpSocketOptions::reuse_port`] to share a local port.
+    /// With several F-Stack processes (multi-core), the port isn't chosen to
+    /// match this process's RSS queue, so prefer [`connect`](Self::connect).
     pub async fn connect_from(
         rt: &TetoRuntime,
         local: SocketAddr,

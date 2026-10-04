@@ -41,7 +41,6 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::net::{Shutdown, SocketAddr};
 use std::pin::Pin;
-use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -63,8 +62,10 @@ thread_local! {
 
 #[derive(Default)]
 struct Slot {
-    read: Option<Waker>,
-    write: Option<Waker>,
+    /// Tasks waiting per direction. Non-empty means a one-shot registration
+    /// for that direction is armed.
+    read: Vec<Waker>,
+    write: Vec<Waker>,
 }
 
 /// Wakes tasks when F-Stack reports their sockets ready. Lives in a
@@ -96,14 +97,16 @@ impl Reactor {
 
     /// Wake the current task once `source` is ready for `interest`
     /// (`READABLE` or `WRITABLE`). The one-shot registration is armed only if
-    /// no earlier wait on this direction is still pending.
+    /// no earlier wait on this direction is still pending; every waiting task
+    /// is woken when it fires.
     fn wait(&mut self, token: u64, source: &impl Source, interest: Interest, waker: &Waker) -> io::Result<()> {
         let slot = self.slots.entry(token).or_default();
-        let stored = if interest.is_readable() { &mut slot.read } else { &mut slot.write };
-        let armed = stored.is_some();
-        *stored = Some(waker.clone());
-        if !armed {
+        let waiters = if interest.is_readable() { &mut slot.read } else { &mut slot.write };
+        if waiters.is_empty() {
             self.kq.register_oneshot(source, token, interest)?;
+        }
+        if !waiters.iter().any(|w| w.will_wake(waker)) {
+            waiters.push(waker.clone());
         }
         Ok(())
     }
@@ -111,7 +114,7 @@ impl Reactor {
     /// Whether a wait for writability on `token` is still pending (the event
     /// hasn't fired yet).
     fn write_pending(&self, token: u64) -> bool {
-        self.slots.get(&token).is_some_and(|s| s.write.is_some())
+        self.slots.get(&token).is_some_and(|s| !s.write.is_empty())
     }
 
     /// Poll the kqueue and wake whoever waits on ready sockets.
@@ -125,15 +128,11 @@ impl Reactor {
                 continue;
             }
             if let Some(slot) = self.slots.get_mut(&token) {
-                if ev.is_readable()
-                    && let Some(w) = slot.read.take()
-                {
-                    w.wake();
+                if ev.is_readable() {
+                    slot.read.drain(..).for_each(Waker::wake);
                 }
-                if ev.is_writable()
-                    && let Some(w) = slot.write.take()
-                {
-                    w.wake();
+                if ev.is_writable() {
+                    slot.write.drain(..).for_each(Waker::wake);
                 }
             }
         }
@@ -141,7 +140,18 @@ impl Reactor {
             self.closing.remove(&token);
         }
         let now = Instant::now();
-        self.closing.retain(|_, (_, since)| now.duration_since(*since) < DROP_GRACE);
+        // A peer that hasn't taken the data in time gets a reset.
+        let expired: Vec<u64> = self
+            .closing
+            .iter()
+            .filter(|(_, (_, since))| now.duration_since(*since) >= DROP_GRACE)
+            .map(|(&t, _)| t)
+            .collect();
+        for token in expired {
+            if let Some((stream, _)) = self.closing.remove(&token) {
+                stream.abort();
+            }
+        }
         Ok(())
     }
 
@@ -167,7 +177,8 @@ impl Reactor {
 /// [`tokio::task::spawn_local`]. When `main` finishes, tasks still running
 /// are dropped; `run` returns `main`'s output once every connection has
 /// delivered its data (or timed out). F-Stack is torn down afterwards and
-/// can't be restarted.
+/// can't be restarted. If `main` panics, the same shutdown happens and the
+/// panic then resumes from `run`.
 pub fn run<F: Future + 'static>(cfg: FStackConfig, main: F) -> io::Result<F::Output>
 where
     F::Output: 'static,
@@ -194,12 +205,8 @@ where
 
     let rt = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
     let mut tasks = Some(tokio::task::LocalSet::new());
-    let output = Rc::new(RefCell::new(None));
-    let out = output.clone();
-    tasks.as_ref().unwrap().spawn_local(async move {
-        let value = main.await;
-        *out.borrow_mut() = Some(value);
-    });
+    let mut main = Some(tasks.as_ref().unwrap().spawn_local(main));
+    let mut output = None;
 
     let mut idle_since: Option<Instant> = None;
     let mut failed = None;
@@ -215,7 +222,11 @@ where
         if let Some(t) = &tasks {
             rt.block_on(t.run_until(tokio::task::yield_now()));
         }
-        if output.borrow().is_some() {
+        if let Some(handle) = main.take_if(|h| h.is_finished()) {
+            // Finished (or panicked): taking the result doesn't block.
+            output = Some(rt.block_on(handle));
+        }
+        if output.is_some() {
             if tasks.is_some() {
                 // `main` is done: drop the remaining tasks now, while F-Stack
                 // still runs, so the connections they hold drain gracefully.
@@ -235,8 +246,11 @@ where
     if let Some(e) = failed {
         return Err(e);
     }
-    let value = output.borrow_mut().take();
-    value.ok_or_else(|| io::Error::other("main future did not complete"))
+    match output {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        _ => Err(io::Error::other("main future did not complete")),
+    }
 }
 
 /// A TCP listener for [`run`]. `!Send`.

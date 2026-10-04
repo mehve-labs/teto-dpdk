@@ -204,8 +204,9 @@ path.
   process. ARP replies are copied to every process.
 - Outbound IPv4 connections pick a local port whose RSS hash maps back to
   the connecting process's queue, so replies reach the right process.
-  F-Stack doesn't do this for IPv6, and `connect_from` with an explicit
-  port bypasses it, so either can have replies land on another process.
+  F-Stack doesn't do this for IPv6 or for `connect_from` (which binds
+  before connecting, even with port 0), so those can have replies land on
+  another process.
 - If the primary exits, the secondaries have to be restarted with it.
 
 DPDK multi-process requires hugepages: a secondary maps the primary's memory

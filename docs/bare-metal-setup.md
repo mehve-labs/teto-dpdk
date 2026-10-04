@@ -165,7 +165,7 @@ Then set `lcore_mask=2` in config.ini (`2` in hex = bit 1 = core 1).
 
 ## 5. Update config.ini
 
-Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings, `no_huge=1` and `memory=512`, and use the hugepages from step 1 instead.
+Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings, `no_huge=1` and `memory=512`, and use the hugepages from step 1 instead. Also remove or replace `addr6=fd00::1` and `prefix_len` under `[port0]`: they're the Docker setup's IPv6 address, and F-Stack would claim it on your network.
 
 Then point DPDK at the NIC. Comments must be on their own lines: F-Stack's INI parser doesn't strip `#` comments that follow a value.
 

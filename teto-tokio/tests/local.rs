@@ -231,3 +231,38 @@ fn tcp_over_ipv6() {
     .expect("run");
     assert_eq!(client.join().unwrap(), b"v6");
 }
+
+/// A panic in `main` stops F-Stack and resumes from `run` instead of
+/// leaving the poll loop running.
+#[test]
+fn panic_in_main_propagates() {
+    let res = std::panic::catch_unwind(|| local::run(config(), async { panic!("boom") }));
+    let payload = res.expect_err("run returned instead of panicking");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"boom"));
+}
+
+/// Two tasks waiting to accept on the same listener: the one still waiting
+/// gets the connection even after the other gave up.
+#[test]
+fn two_waiters_on_one_listener() {
+    let client = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(1));
+        let mut c = connect(fstack(8080));
+        c.write_all(b"hi").unwrap();
+        c.shutdown(Shutdown::Write).unwrap();
+        read_all(&mut c)
+    });
+    local::run(config(), async {
+        let listener = std::rc::Rc::new(LocalTcpListener::bind(fstack(8080), &opts()).expect("bind"));
+        let l = listener.clone();
+        let waiter = tokio::task::spawn_local(async move { l.accept().await });
+        tokio::task::yield_now().await;
+        assert!(timeout(Duration::from_millis(300), listener.accept()).await.is_err());
+        let (mut s, _) = timeout(T * 3, waiter).await.expect("first waiter never woken").unwrap().unwrap();
+        let mut v = Vec::new();
+        s.read_to_end(&mut v).await.unwrap();
+        s.write_all(&v).await.unwrap();
+    })
+    .expect("run");
+    assert_eq!(client.join().unwrap(), b"hi");
+}

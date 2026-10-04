@@ -131,7 +131,8 @@ impl TetoUdpSocket {
         let mut rx = self.rx.lock().await;
         loop {
             let (data, addr) = rx.recv().await.ok_or_else(runtime_stopped)??;
-            if lock(&self.peer).is_some_and(|peer| peer != addr) {
+            // Address and port only: FreeBSD fills scope_id and flowinfo its own way.
+            if lock(&self.peer).is_some_and(|peer| peer.ip() != addr.ip() || peer.port() != addr.port()) {
                 continue;
             }
             let n = data.len().min(buf.len());
