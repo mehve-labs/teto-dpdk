@@ -1,3 +1,17 @@
+use std::io;
+
+/// Config file used by the [`FStackConfig::for_docker`] and
+/// [`FStackConfig::for_bare_metal`] profiles: `$TETO_CONFIG` if set,
+/// otherwise `config.ini` in the working directory.
+pub const CONFIG_ENV: &str = "TETO_CONFIG";
+
+/// Selects the profile used by [`FStackConfig::from_env`].
+pub const PROFILE_ENV: &str = "TETO_PROFILE";
+
+fn default_config_file() -> String {
+    std::env::var(CONFIG_ENV).unwrap_or_else(|_| "config.ini".into())
+}
+
 /// Builder for F-Stack / DPDK initialisation arguments.
 ///
 /// Separates the config-file arguments (understood by F-Stack's own parser)
@@ -40,6 +54,18 @@ impl FStackConfig {
         }
     }
 
+    /// Use a different `config.ini`. Relative paths are resolved against the
+    /// working directory when F-Stack is initialised.
+    pub fn with_config_file(mut self, config_file: impl Into<String>) -> Self {
+        self.config_file = config_file.into();
+        self
+    }
+
+    /// The `config.ini` path F-Stack will be initialised from.
+    pub fn config_file(&self) -> &str {
+        &self.config_file
+    }
+
     /// Append a single extra EAL argument (e.g. `"--no-pci"`).
     pub fn with_eal_arg(mut self, arg: impl Into<String>) -> Self {
         self.eal_args.push(arg.into());
@@ -68,7 +94,8 @@ impl FStackConfig {
     // Pre-built profiles
     // ------------------------------------------------------------------
 
-    /// Docker / TAP device profile.
+    /// Docker / TAP device profile. Reads `$TETO_CONFIG`, or `config.ini` in
+    /// the working directory.
     ///
     /// Injects the three EAL arguments that are required when running DPDK
     /// inside a container with a TAP virtual interface instead of a real NIC:
@@ -85,19 +112,34 @@ impl FStackConfig {
     /// - `--iova-mode=va`  — force Virtual Address IOVA mode, required in
     ///   containers / WSL2 where physical address access is unavailable.
     pub fn for_docker() -> Self {
-        Self::new("config.ini")
+        Self::new(default_config_file())
             .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
             .with_eal_arg("--no-pci")
             .with_eal_arg("--iova-mode=va")
     }
 
-    /// Bare-metal / AWS profile.
+    /// Profile chosen by `$TETO_PROFILE`: `docker` (default) or `bare-metal`,
+    /// with the config file from `$TETO_CONFIG` (default `config.ini`). Used
+    /// by the examples so they run unchanged in either environment.
+    pub fn from_env() -> io::Result<Self> {
+        match std::env::var(PROFILE_ENV).as_deref() {
+            Err(_) | Ok("docker") => Ok(Self::for_docker()),
+            Ok("bare-metal") => Ok(Self::for_bare_metal()),
+            Ok(other) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{PROFILE_ENV}={other:?}: expected \"docker\" or \"bare-metal\""),
+            )),
+        }
+    }
+
+    /// Bare-metal / AWS profile. Reads `$TETO_CONFIG`, or `config.ini` in
+    /// the working directory.
     ///
     /// No extra EAL arguments are needed: DPDK discovers the NIC via the
     /// `allow=` key in `config.ini`, PCI scanning is required, and IOVA mode
     /// is auto-detected based on whether IOMMU is present.
     pub fn for_bare_metal() -> Self {
-        Self::new("config.ini")
+        Self::new(default_config_file())
     }
 
     // ------------------------------------------------------------------
@@ -185,13 +227,22 @@ pub struct TcpSocketOptions {
 }
 
 impl TcpSocketOptions {
+    /// Set [`nodelay`](Self::nodelay) (`TCP_NODELAY`).
     pub fn nodelay(mut self, v: bool) -> Self { self.nodelay = Some(v); self }
+    /// Set [`keepalive`](Self::keepalive) (`SO_KEEPALIVE`).
     pub fn keepalive(mut self, v: bool) -> Self { self.keepalive = Some(v); self }
+    /// Set [`keepalive_idle_secs`](Self::keepalive_idle_secs) (`TCP_KEEPIDLE`).
     pub fn keepalive_idle_secs(mut self, v: u32) -> Self { self.keepalive_idle_secs = Some(v); self }
+    /// Set [`keepalive_interval_secs`](Self::keepalive_interval_secs) (`TCP_KEEPINTVL`).
     pub fn keepalive_interval_secs(mut self, v: u32) -> Self { self.keepalive_interval_secs = Some(v); self }
+    /// Set [`keepalive_count`](Self::keepalive_count) (`TCP_KEEPCNT`).
     pub fn keepalive_count(mut self, v: u32) -> Self { self.keepalive_count = Some(v); self }
+    /// Set [`recv_buf`](Self::recv_buf) (`SO_RCVBUF`).
     pub fn recv_buf(mut self, v: u32) -> Self { self.recv_buf = Some(v); self }
+    /// Set [`send_buf`](Self::send_buf) (`SO_SNDBUF`).
     pub fn send_buf(mut self, v: u32) -> Self { self.send_buf = Some(v); self }
+    /// Set [`linger_secs`](Self::linger_secs) (`SO_LINGER`).
     pub fn linger_secs(mut self, v: u32) -> Self { self.linger_secs = Some(v); self }
+    /// Set [`reuse_port`](Self::reuse_port) (`SO_REUSEPORT`, listeners only).
     pub fn reuse_port(mut self, v: bool) -> Self { self.reuse_port = Some(v); self }
 }

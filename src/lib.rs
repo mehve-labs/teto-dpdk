@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Rust bindings for [F-Stack](https://github.com/F-Stack/f-stack): userspace
 //! TCP/UDP over DPDK.
 //!
@@ -26,6 +27,7 @@
 //! all work happens inside [`FStack::run`]. See `teto-tokio` for an async
 //! adapter.
 
+/// F-Stack initialisation settings and per-connection TCP options.
 pub mod config;
 pub mod event;
 pub mod net;

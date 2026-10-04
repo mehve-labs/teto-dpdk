@@ -12,7 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = FStackConfig::for_docker();
+    // TETO_PROFILE=bare-metal for a real NIC (default: Docker/TAP).
+    let cfg = FStackConfig::from_env()?;
     let addr = "0.0.0.0:8080".parse()?;
     let opts = TcpSocketOptions::default().nodelay(true);
 

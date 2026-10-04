@@ -56,6 +56,21 @@ impl FStack {
     /// Some fatal DPDK errors terminate the process inside DPDK itself
     /// (`rte_exit`); those cannot be turned into an `Err`.
     pub fn init(cfg: &FStackConfig) -> io::Result<FStack> {
+        // Checked before anything touches F-Stack, so a wrong path can be
+        // fixed and init retried (a failed F-Stack init can't be).
+        let path = std::path::Path::new(cfg.config_file());
+        if !path.is_file() {
+            let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "F-Stack config file {} not found (working directory: {cwd}); \
+                     pass a path to FStackConfig::new / with_config_file or set ${}",
+                    path.display(),
+                    crate::config::CONFIG_ENV
+                ),
+            ));
+        }
         if INIT_ATTEMPTED.swap(true, Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,

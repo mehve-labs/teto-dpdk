@@ -66,10 +66,12 @@ impl TetoTcpStream {
         self.conn.notify(&mut st);
     }
 
+    /// The remote address.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
+    /// The local address of this connection.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

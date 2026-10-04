@@ -120,6 +120,7 @@ impl TetoUdpSocket {
         Ok(buf.len())
     }
 
+    /// The address the socket is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

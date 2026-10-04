@@ -154,11 +154,16 @@ let cfg = FStackConfig::for_docker();
 // Bare metal / AWS with a real NIC bound via VFIO
 let cfg = FStackConfig::for_bare_metal();
 
+// Chosen at run time: TETO_PROFILE=docker|bare-metal (default docker)
+let cfg = FStackConfig::from_env()?;
+
 // Custom
-let cfg = FStackConfig::new("config.ini")
+let cfg = FStackConfig::new("/etc/teto/config.ini")
     .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
     .with_eal_arg("--no-pci");
 ```
+
+The profiles read `config.ini` from the working directory unless `TETO_CONFIG` names another file (or use `with_config_file`). A missing file is reported before F-Stack is initialised, so it can be fixed without restarting the process.
 
 F-Stack and DPDK print a few dozen lines while initialising (EAL messages, a config echo, interface setup). `FStackConfig::capture_init_output(true)` keeps them off the terminal. On failure they're appended to the error, which is usually the best diagnostic available; on success they're available from `FStack::init_output()` / `TetoRuntime::init_output()`. It redirects the process's stdout/stderr for the duration of init, so leave it off if other threads may be printing then. For DPDK's runtime logging, the `[dpdk]` `log_level` key in `config.ini` applies.
 
@@ -201,6 +206,7 @@ teto-dpdk/                          (Cargo workspace root)
 ├── Dockerfile              # Builds DPDK + F-Stack from source
 ├── entrypoint.sh           # Configures the kernel-side TAP device
 └── docs/
+    ├── architecture.md     # Threads, buffers, lifecycles, linking, limits
     ├── testing-docker.md   # Docker testing guide and diagnostics
     ├── bare-metal-setup.md # Bare metal and AWS setup guide
     └── config-reference.md # All config.ini keys explained
@@ -239,6 +245,7 @@ The data path copies each payload once between F-Stack and the per-connection bu
 
 | Document | Description |
 |----------|-------------|
+| [docs/architecture.md](docs/architecture.md) | How the crates fit together: threads, buffers and backpressure, connection and runtime lifecycles, linking, known limits |
 | [docs/testing-docker.md](docs/testing-docker.md) | Step-by-step Docker testing guide, startup output walkthrough, and a full diagnostic checklist |
 | [docs/bare-metal-setup.md](docs/bare-metal-setup.md) | Setting up hugepages, IOMMU, NIC binding with VFIO, and AWS SR-IOV configuration |
 | [docs/config-reference.md](docs/config-reference.md) | Every `config.ini` key explained, including common pitfalls and silently-ignored keys |

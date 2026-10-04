@@ -149,6 +149,7 @@ impl TcpListener {
         Ok((TcpStream { fd, peer }, peer))
     }
 
+    /// The local address (resolves a port-0 bind to the assigned port).
     pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
         local_addr(&self.fd)
     }
@@ -209,6 +210,7 @@ impl TcpStream {
         Ok(cvt(ffi::sock_write(self.fd.get()?, buf))? as usize)
     }
 
+    /// Shut down the read side, the write side (sends FIN) or both.
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         let how = match how {
             Shutdown::Read => 0,
@@ -233,10 +235,12 @@ impl TcpStream {
         Ok(cvt32(ffi::sock_unsent(self.fd.get()?))? as usize)
     }
 
+    /// The remote address.
     pub fn peer_addr(&self) -> SocketAddrV4 {
         self.peer
     }
 
+    /// The local address (resolves a port-0 bind to the assigned port).
     pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
         local_addr(&self.fd)
     }
@@ -249,6 +253,7 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
+    /// Bind a non-blocking UDP socket to `addr` (IPv4 only).
     pub fn bind(_fs: &FStack, addr: SocketAddr) -> io::Result<Self> {
         let addr = require_v4(addr)?;
         let fd = nonblocking_socket(ffi::sock_udp)?;
@@ -277,11 +282,14 @@ impl UdpSocket {
         Ok((n as usize, v4(ip, port)))
     }
 
+    /// Send one datagram to `addr`. Returns [`io::ErrorKind::WouldBlock`] if
+    /// F-Stack can't take it right now.
     pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
         let addr = require_v4(addr)?;
         Ok(cvt(ffi::sock_sendto_v4(self.fd.get()?, buf, (*addr.ip()).into(), addr.port()))? as usize)
     }
 
+    /// The local address (resolves a port-0 bind to the assigned port).
     pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
         local_addr(&self.fd)
     }

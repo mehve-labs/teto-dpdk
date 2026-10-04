@@ -82,6 +82,7 @@ impl TetoTcpListener {
         Ok((stream, peer))
     }
 
+    /// The address the listener is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

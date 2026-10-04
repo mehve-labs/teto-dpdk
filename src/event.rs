@@ -38,32 +38,40 @@ pub struct Interest(u8);
 impl Interest {
     /// No interest; registering with it removes all filters.
     pub const NONE: Interest = Interest(0);
+    /// Data, EOF or a pending connection can be read/accepted.
     pub const READABLE: Interest = Interest(1);
+    /// The send buffer has room (or a connect finished).
     pub const WRITABLE: Interest = Interest(2);
     /// The socket's send buffer is empty: for TCP, everything written has
     /// been acknowledged by the peer (FreeBSD `EVFILT_EMPTY`).
     pub const SEND_EMPTY: Interest = Interest(4);
 
+    /// Includes [`READABLE`](Self::READABLE).
     pub fn is_readable(self) -> bool {
         self.0 & 1 != 0
     }
 
+    /// Includes [`WRITABLE`](Self::WRITABLE).
     pub fn is_writable(self) -> bool {
         self.0 & 2 != 0
     }
 
+    /// Includes [`SEND_EMPTY`](Self::SEND_EMPTY).
     pub fn is_send_empty(self) -> bool {
         self.0 & 4 != 0
     }
 
+    /// Asks for nothing (registering it removes all filters).
     pub fn is_none(self) -> bool {
         self.0 == 0
     }
 
+    /// This interest plus `other`.
     pub fn with(self, other: Interest) -> Interest {
         Interest(self.0 | other.0)
     }
 
+    /// This interest minus `other`.
     pub fn without(self, other: Interest) -> Interest {
         Interest(self.0 & !other.0)
     }
@@ -88,6 +96,7 @@ pub struct Event {
 }
 
 impl Event {
+    /// The token the source was registered with.
     pub fn token(&self) -> u64 {
         self.token
     }
@@ -97,6 +106,8 @@ impl Event {
         self.readable
     }
 
+    /// The send buffer has room, or a non-blocking connect finished
+    /// (check [`TcpStream::take_error`](crate::net::TcpStream::take_error)).
     pub fn is_writable(&self) -> bool {
         self.writable
     }
@@ -127,18 +138,22 @@ pub struct Events {
 }
 
 impl Events {
+    /// A buffer for up to `capacity` events per [`Kqueue::poll`] (at least 1).
     pub fn with_capacity(capacity: usize) -> Self {
         Events { buf: vec![ffi::KEvent::default(); capacity.max(1)], len: 0 }
     }
 
+    /// Number of events from the last poll.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// The last poll returned no events.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// The events from the last poll.
     pub fn iter(&self) -> impl Iterator<Item = Event> + '_ {
         self.buf[..self.len].iter().map(|k| Event {
             token: k.udata,
@@ -158,6 +173,7 @@ pub struct Kqueue {
 }
 
 impl Kqueue {
+    /// Create a kqueue.
     pub fn new(_fs: &FStack) -> io::Result<Self> {
         crate::runtime::ensure_alive()?;
         let raw = cvt32(ffi::kq_create())?;

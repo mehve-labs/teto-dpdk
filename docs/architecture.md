@@ -1,0 +1,201 @@
+# Architecture
+
+How teto is put together, and why. Read this before changing the runtime,
+the driver or the build script.
+
+## Layers
+
+```
+ your code ───────────────────────────────────────────────────────────────
+   teto-tokio   TetoRuntime · TetoTcpListener · TetoTcpStream · TetoUdpSocket
+                (async, Send + Sync; talks to the F-Stack thread, never to F-Stack)
+ ─────────────────────────────────────────────────────────────────────────
+   teto-dpdk    FStack (init / run / stop) · net::{TcpListener, TcpStream,
+                UdpSocket} · event::Kqueue          (safe, !Send, non-blocking)
+                src/sys.rs: cxx bridge
+ ─────────────────────────────────────────────────────────────────────────
+   cxx_layer/   thin C++ shim: ff_* calls, returns -errno, no state, no callbacks
+ ─────────────────────────────────────────────────────────────────────────
+   F-Stack      FreeBSD TCP/IP stack in user space (libfstack.a)
+   DPDK         poll-mode NIC drivers (or the TAP PMD in Docker)
+```
+
+You can use either crate on its own terms:
+
+- **teto-dpdk** runs your code on the F-Stack thread itself, once per
+  poll-loop iteration (`FStack::run(|| ...)`). There's no extra thread hop,
+  but you write a non-blocking event loop by hand (see `examples/tcp_echo.rs`).
+- **teto-tokio** gives you ordinary async/await sockets. A dedicated F-Stack
+  thread does the socket work, and data crosses threads through per-connection
+  buffers.
+
+## teto-dpdk
+
+### The F-Stack lifecycle
+
+F-Stack is a process-wide singleton, and initialisation can't be undone:
+
+```
+UNINIT ──init──▶ READY ──run──▶ RUNNING ──loop returns──▶ FINISHED
+```
+
+- `FStack::init` succeeds once per process. A second call, or a call after a
+  failed one, returns `AlreadyExists`, because DPDK can't be re-initialised.
+  A missing config file is detected *before* touching F-Stack, so that one
+  mistake stays recoverable.
+- `FStack::run` runs at most once. When F-Stack's loop returns, `ff_run` tears
+  the stack down (`ff_unload_config`, `rte_eal_cleanup`). From then on every
+  socket call returns `BrokenPipe`, and dropping a socket skips `ff_close`,
+  which would otherwise be a use-after-free.
+- `FStack` and every socket are `!Send`, because F-Stack must only be called
+  from the thread that initialised it. Holding an `FStack` proves you're on that
+  thread after a successful init.
+- A panic in the `run` closure is caught at the FFI boundary, the loop is
+  stopped, and the panic resumes from `run`. Unwinding through F-Stack's C
+  frames would abort.
+
+### Sockets and the kqueue
+
+All sockets are non-blocking. Operations that would block return
+`WouldBlock`, and the `Kqueue` tells you when to retry. Registrations are
+**level-triggered** and carry a caller-chosen `u64` token. Always use tokens
+that are never reused, never descriptor numbers. F-Stack reuses descriptors
+immediately, and that was the cause of the original cross-connection data bug.
+
+Errors are Linux `errno` values (F-Stack translates FreeBSD's), so
+`io::ErrorKind` works as usual. `SO_ERROR` comes back in FreeBSD numbering
+and the shim translates it.
+
+## teto-tokio
+
+### Threads
+
+```
+ tokio worker threads                            F-Stack thread (one per process)
+ ────────────────────                            ───────────────────────────────
+ TetoTcpStream ──┐  per-connection Mutex<ConnState>  ┌── Driver::tick() once per
+ TetoTcpStream ──┼─▶  rx buffer ◀── read ─────────────┤   poll-loop iteration:
+ ...             │    tx buffer ─── write ───────────▶│    1. run commands
+                 │    flags, error, wakers            │    2. service notified conns
+                 └─▶ Notifier (ids needing service) ─▶│    3. listeners / connects / UDP
+ TetoRuntime ─────▶ command channel ─────────────────▶│    4. kqueue poll → events
+   (bind, listen, connect)                            │    5. deadlines, stop check
+```
+
+- **Commands** (`ListenTcp`, `BindUdp`, `Connect`) carry a oneshot reply. A
+  failed bind is just an `Err`, and the runtime stays usable.
+- **Connections** share an `Arc<Conn>`: a mutex-protected `ConnState` plus the
+  connection's id. Tokio tasks only touch buffers and flags. Every F-Stack call
+  happens on the F-Stack thread.
+- **Notifications**: when a task needs the driver (it queued bytes, drained the
+  receive buffer, requested shutdown, dropped the stream), it pushes the
+  connection id onto the `Notifier`. A `notified` flag keeps each id queued at
+  most once. Lock order is always connection → notifier. Wakers are collected
+  under the lock and fired after it is released.
+- **Ids** come from one counter, are never reused, and double as kqueue
+  tokens. A stale handle can only reach its own `Arc<Conn>`.
+
+### Data path and backpressure
+
+| Buffer | Bound | When full |
+|---|---|---|
+| per-connection receive (`rx`) | 256 KiB (`RX_HIGH`) | driver stops reading the socket (read interest removed); TCP flow control slows the peer; resumes below 128 KiB (`RX_LOW`) |
+| per-connection send (`tx`) | 256 KiB (`TX_LIMIT`) | `poll_write` returns `Pending` until the driver has handed bytes to F-Stack |
+| accept queue | 1024 per listener | listener stops accepting; clients wait in F-Stack's backlog |
+| UDP receive / send queues | 1024 datagrams each | stop reading (F-Stack's socket buffer drops on overflow) / `send_to` waits |
+
+Payloads are copied once from F-Stack into `rx` (read straight into spare
+`BytesMut` capacity) and once into your buffer, the same as a kernel socket
+read. Writes are copied into `tx` and from there into F-Stack's mbufs. UDP
+datagrams are carved out of 1 MiB blocks without per-datagram allocation.
+
+`flush` completes when `tx` is empty, i.e. F-Stack has accepted the bytes.
+That's like a kernel socket's flush, except that it can wait on a peer that
+stops reading.
+
+### Connection lifecycle
+
+```
+accept/connect ──▶ open ──peer FIN──▶ read EOF (Ok(0)); writing still allowed
+                    │
+                    ├─ shutdown() ──▶ flush tx, send FIN; reading still allowed
+                    ├─ error (RST, timeout) ──▶ reads/writes return the error
+                    └─ drop ──▶ draining:
+                                  1. hand remaining tx to F-Stack
+                                  2. FIN, discard further input
+                                  3. close when the peer has ACKed everything
+                                     (kqueue EVFILT_EMPTY)
+                                  4. after 30 s: abort (RST) instead
+```
+
+- Accepted connections aren't read until your code takes them from the
+  accept queue, so unaccepted clients can't make the driver buffer data.
+- A connection lost on its way to your code (left in a dropped listener's
+  queue, or a `connect` cancelled at the wrong moment) travels as a
+  `Connected` value whose `Drop` starts the same draining sequence.
+
+### Runtime lifecycle
+
+The F-Stack thread runs until every `TetoRuntime` clone and every socket
+created from one has been dropped (each holds a runtime handle). It then
+waits for draining connections, then for a further second (`STOP_GRACE`) so
+final FINs and ACKs leave, and then stops the loop, which tears F-Stack down.
+Data still being delivered is lost if the process exits first.
+
+If a driver tick panics, the loop stops. Every stream then gets a "runtime
+stopped" error, and channels close so pending calls fail instead of hanging.
+
+## Building and linking
+
+`build.rs` compiles the C++ shim and emits link settings as
+`rustc-link-lib`/`rustc-link-search`, which cargo propagates to every crate
+that depends on teto. (`rustc-link-arg` would only reach this package's own
+targets, and downstream applications would fail to link; CI builds
+`ci/downstream` to catch that.)
+
+- DPDK's `pkg-config --static` flags are translated: archives inside its
+  `--whole-archive` group become `static:+whole-archive,-bundle` libraries,
+  system libraries become `dylib`.
+- `libfstack.a` is pre-linked (`ld -r`) into one object. A small linker
+  script defines the FreeBSD linker sets' `__start_set_*`/`__stop_set_*`
+  symbols inside those sections. FreeBSD finds SYSINITs and sysctls by walking
+  these sets, and linkers that garbage-collect sections only referenced by
+  such symbols (lld, Rust's default on x86_64 Linux since 1.90) would
+  otherwise drop them. Defining the symbols keeps the sections alive with any
+  linker, without `-z nostart-stop-gc`, which a library can't pass to its
+  dependents.
+- `FF_PATH` selects the F-Stack tree (default `/opt/f-stack`).
+
+## Known limits
+
+- **One core.** One F-Stack thread with one NIC queue. Scaling across cores
+  would follow F-Stack's process-per-lcore model with RSS; that's not designed
+  yet.
+- **Cross-thread hop (teto-tokio).** Every operation crosses between tokio's
+  threads and the F-Stack thread, with a mutex and a wakeup each way. Whether
+  this costs much against a tuned kernel path is unmeasured: there are no
+  real-NIC benchmarks yet (`scripts/bench.sh` describes how to run them).
+  The low-level API avoids the hop; an async executor running on the F-Stack
+  thread would avoid it while keeping async/await.
+- **IPv4 only.** IPv6 addresses are rejected explicitly.
+- **F-Stack version.** Pinned to v1.25. F-Stack master (as of July 2026) runs no
+  FreeBSD kernel timers, which breaks retransmission. `tests/faults.rs` fails
+  on it, so run that suite when upgrading.
+
+## Testing
+
+Everything except docs builds needs F-Stack, so tests run in the Docker image
+(privileged, with `entrypoint.sh` configuring the kernel side of the TAP
+device). Each test binary starts its own F-Stack instance; cargo runs them one
+after another. `scripts/ci-test.sh` is what CI runs:
+
+- **Behaviour:** `teto-tokio/tests/{tcp,udp,runtime}.rs` and
+  `tests/lowlevel.rs`: half-close, resets, descriptor reuse, backpressure in
+  both directions, drop delivery, multiple sockets, outbound connect, runtime
+  exit.
+- **Init and failure paths:** `tests/{init_bad_config,init_eal_overflow,run_panic}.rs`.
+- **Network faults:** `teto-tokio/tests/faults.rs` impairs the TAP link with `tc`
+  (loss, delay, reordering, outages, silent peers).
+- **Scale:** `teto-tokio/tests/scale.rs` (1000 concurrent connections, churn
+  with a memory check; `TETO_SOAK_SECS` for long soaks).
+- **Downstream linking:** `ci/downstream`.

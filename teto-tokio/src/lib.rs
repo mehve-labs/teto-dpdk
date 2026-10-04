@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Async [tokio](https://tokio.rs) adapter for `teto-dpdk`.
 //!
 //! [`TetoRuntime`] starts a dedicated thread running the F-Stack poll loop.

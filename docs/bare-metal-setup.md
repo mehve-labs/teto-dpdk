@@ -21,10 +21,10 @@ apt install -y \
 
 ### Build DPDK and F-Stack
 
-Follow the same steps as the Dockerfile -- the binaries need to be on the host:
+Follow the same steps as the Dockerfile -- the binaries need to be on the host. Use the F-Stack release the project is tested against (v1.25). F-Stack master as of mid-2026 runs no FreeBSD kernel timers, so TCP retransmission and keepalive don't work there.
 
 ```bash
-git clone --recurse-submodules https://github.com/F-Stack/f-stack.git /opt/f-stack
+git clone --recurse-submodules --depth 1 --branch v1.25 https://github.com/F-Stack/f-stack.git /opt/f-stack
 
 # Build DPDK
 cd /opt/f-stack/dpdk
@@ -36,10 +36,14 @@ cd /opt/f-stack/lib
 FF_DPDK=/usr/local FF_PATH=/opt/f-stack make -j$(nproc)
 ```
 
+If F-Stack lives somewhere other than `/opt/f-stack`, set `FF_PATH` to its source tree when building teto (`FF_PATH=/path/to/f-stack cargo build`). If DPDK isn't installed under a standard prefix, point `PKG_CONFIG_PATH` at the directory containing `libdpdk.pc`.
+
 ### Rust
 
+teto needs Rust 1.97 or newer; CI builds with 1.99.0.
+
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0
 ```
 
 ---
@@ -182,51 +186,48 @@ hz=100
 # Leave net.inet.udp.checksum at default (1) -- real NICs compute correct checksums
 ```
 
+Keep `pkt_tx_delay=0` in `[dpdk]` (the repository's default) for latency, or raise it toward 100 for bulk throughput. See [config-reference.md](config-reference.md#dpdk).
+
 See [config-reference.md](config-reference.md) for all available keys.
 
 ---
 
-## 6. Update the C++ wrapper
+## 6. Select the bare-metal profile
 
-Remove the TAP-specific EAL argument injection from `cxx_layer/fstack_wrapper.cpp`. On bare metal, F-Stack handles the NIC via the `allow` key in config.ini and no manual injection is needed.
+Nothing in the code changes between Docker and bare metal. The Docker profile (`FStackConfig::for_docker()`) adds the TAP device's EAL arguments (`--vdev=net_tap0,...`, `--no-pci`, `--iova-mode=va`); the bare-metal profile adds none, and DPDK finds the NIC through the `allow` key in `config.ini`.
 
-Remove these lines from `init_fstack`:
+In your own code:
 
-```cpp
-// Remove all of these:
-dpdk_argv[dpdk_argc++] = strdup("--vdev=net_tap0,iface=dtap0");
-dpdk_argv[dpdk_argc++] = strdup("--no-pci");
-dpdk_argv[dpdk_argc++] = strdup("--iova-mode=va");
-dpdk_argv[dpdk_argc] = nullptr;
+```rust
+use teto_dpdk::FStackConfig;
+use teto_tokio::TetoRuntime;
+
+let cfg = FStackConfig::for_bare_metal().with_config_file("/etc/teto/config.ini");
+let rt = TetoRuntime::start(cfg).await?;
 ```
 
-The block becomes simply:
+The examples pick the profile from the environment (`FStackConfig::from_env()`): `TETO_PROFILE=bare-metal` selects the bare-metal profile, and `TETO_CONFIG` names the config file (default: `config.ini` in the working directory).
 
-```cpp
-if (ff_load_config(argc, argv.data()) < 0) {
-    throw std::runtime_error("F-Stack config load failed.");
-}
-
-if (ff_dpdk_init(dpdk_argc, dpdk_argv) < 0) {
-    throw std::runtime_error("F-Stack DPDK init failed.");
-}
-```
-
-Also remove `entrypoint.sh` from your startup -- there is no TAP device to configure.
+Don't run `entrypoint.sh` on bare metal: there's no TAP device to configure.
 
 ---
 
 ## 7. Run
 
-```bash
-cargo run
-```
-
-F-Stack will initialize against the physical NIC. Send test traffic from another machine on the same network:
+F-Stack needs root (or the capabilities for VFIO and hugepages):
 
 ```bash
-echo "Hello F-Stack!" | nc -u -w1 192.168.1.10 8080
+sudo TETO_PROFILE=bare-metal TETO_CONFIG=$PWD/config.ini \
+    $(which cargo) run --release -p teto-tokio --example tcp_echo_async
 ```
+
+Send test traffic from another machine on the same network:
+
+```bash
+echo "Hello F-Stack!" | nc -w3 192.168.1.10 8080
+```
+
+To compare against the kernel stack, run `scripts/bench.sh`'s two-host procedure (see the header of that script).
 
 ---
 

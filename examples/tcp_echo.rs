@@ -61,8 +61,8 @@ fn on_ready(conn: &mut Conn, buf: &mut [u8]) -> io::Result<bool> {
 }
 
 fn main() -> io::Result<()> {
-    // Docker/TAP configuration — swap for FStackConfig::for_bare_metal() on bare metal.
-    let fs = FStack::init(&FStackConfig::for_docker())?;
+    // TETO_PROFILE=bare-metal for a real NIC (default: Docker/TAP).
+    let fs = FStack::init(&FStackConfig::from_env()?)?;
     let opts = TcpSocketOptions::default().nodelay(true);
     let listener = TcpListener::bind(&fs, "0.0.0.0:8080".parse().unwrap(), &opts)?;
     let kq = Kqueue::new(&fs)?;
