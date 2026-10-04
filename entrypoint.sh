@@ -58,14 +58,20 @@ configure_dtap0() {
 # F-Stack would silently drop all ARP replies from the kernel, making the
 # return path (echo replies) impossible.
 (
+    # dtap0 can disappear mid-configuration when the DPDK process exits; with
+    # `set -e` that would kill this loop for the rest of the container's life.
+    set +e
     CONFIGURED_FOR=""
     while true; do
         if ip link show dtap0 > /dev/null 2>&1; then
-            CURRENT_MAC=$(cat /sys/class/net/dtap0/address | tr -d '[:space:]')
-            if [ "$CURRENT_MAC" != "$CONFIGURED_FOR" ]; then
+            # Track the interface index, not the MAC: with mac=fixed a re-created
+            # dtap0 keeps its MAC, and a restart inside one poll interval would
+            # otherwise go unnoticed and leave the new device unconfigured.
+            CURRENT_IDX=$(cat /sys/class/net/dtap0/ifindex 2>/dev/null)
+            if [ "$CURRENT_IDX" != "$CONFIGURED_FOR" ]; then
                 sleep 3
                 configure_dtap0
-                CONFIGURED_FOR=$(cat /sys/class/net/dtap0/address | tr -d '[:space:]')
+                CONFIGURED_FOR=$(cat /sys/class/net/dtap0/ifindex 2>/dev/null)
             fi
         else
             CONFIGURED_FOR=""

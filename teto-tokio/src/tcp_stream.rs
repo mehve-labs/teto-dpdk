@@ -1,52 +1,69 @@
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::Buf;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
 
-use crate::runtime::FStackCmd;
+use crate::conn::{Conn, ConnState, WriteShutdown, RX_LOW, TX_LIMIT};
 
 /// An async TCP stream backed by an F-Stack connection.
 ///
 /// Implements [`tokio::io::AsyncRead`] and [`tokio::io::AsyncWrite`], so it
-/// can be used with all the familiar `tokio::io` utilities (`read`, `write_all`,
-/// `copy`, `BufReader`, etc.).
+/// works with the usual `tokio::io` utilities (`read`, `write_all`, `copy`,
+/// `BufReader`, `split`, ...).
 ///
-/// Reads are fulfilled from data pushed by the F-Stack poll loop via an async
-/// channel. Writes are queued as commands and executed on the next F-Stack
-/// poll iteration.
+/// - Reads return data received by the F-Stack thread. `Ok(0)` means the peer
+///   shut down its write side; the stream can still be written to.
+/// - Writes are buffered (up to 256 KiB per connection) and handed to F-Stack
+///   on its next poll iteration. `poll_write` returns `Pending` while the
+///   buffer is full, so a slow peer slows the writer down. `flush` completes
+///   once F-Stack has accepted everything written.
+/// - `shutdown` flushes and then shuts down the write side (TCP FIN).
+/// - Connection failures (e.g. reset by peer) are returned as errors from
+///   reads and writes.
+/// - Dropping the stream closes the connection after buffered writes have been
+///   handed to F-Stack (bounded by a 30 s grace period).
 pub struct TetoTcpStream {
-    fd: i32,
+    conn: Arc<Conn>,
     peer_addr: SocketAddr,
-    data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    cmd_tx: mpsc::UnboundedSender<FStackCmd>,
-    read_buf: BytesMut,
-    shutdown_sent: bool,
+    local_addr: SocketAddr,
 }
 
 impl TetoTcpStream {
-    pub(crate) fn new(
-        fd: i32,
-        peer_addr: SocketAddr,
-        data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        cmd_tx: mpsc::UnboundedSender<FStackCmd>,
-    ) -> Self {
-        Self {
-            fd,
-            peer_addr,
-            data_rx,
-            cmd_tx,
-            read_buf: BytesMut::new(),
-            shutdown_sent: false,
-        }
+    pub(crate) fn new(conn: Arc<Conn>, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
+        Self { conn, peer_addr, local_addr }
     }
 
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+}
+
+impl std::fmt::Debug for TetoTcpStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TetoTcpStream")
+            .field("id", &self.conn.id)
+            .field("peer_addr", &self.peer_addr)
+            .field("local_addr", &self.local_addr)
+            .finish()
+    }
+}
+
+fn write_error(st: &ConnState) -> Option<io::Error> {
+    if let Some(e) = st.error {
+        return Some(e.to_io());
+    }
+    if st.wr_shutdown != WriteShutdown::Open {
+        return Some(io::Error::new(io::ErrorKind::BrokenPipe, "write side shut down"));
+    }
+    None
 }
 
 impl AsyncRead for TetoTcpStream {
@@ -55,63 +72,93 @@ impl AsyncRead for TetoTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
+        let conn = &self.conn;
+        let mut st = conn.lock();
 
-        if !this.read_buf.is_empty() {
-            let n = std::cmp::min(this.read_buf.len(), buf.remaining());
-            buf.put_slice(&this.read_buf.split_to(n));
+        if !st.rx.is_empty() {
+            let n = st.rx.len().min(buf.remaining());
+            buf.put_slice(&st.rx[..n]);
+            st.rx.advance(n);
+            if st.rx_paused && st.rx.len() < RX_LOW {
+                conn.notify(&mut st);
+            }
             return Poll::Ready(Ok(()));
         }
-
-        match this.data_rx.poll_recv(cx) {
-            Poll::Ready(Some(data)) => {
-                let n = std::cmp::min(data.len(), buf.remaining());
-                buf.put_slice(&data[..n]);
-                if n < data.len() {
-                    this.read_buf.extend_from_slice(&data[n..]);
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(None) => Poll::Ready(Ok(())),
-            Poll::Pending => Poll::Pending,
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
         }
+        if let Some(e) = st.error {
+            return Poll::Ready(Err(e.to_io()));
+        }
+        if st.rx_eof {
+            return Poll::Ready(Ok(()));
+        }
+        st.read_waker = Some(cx.waker().clone());
+        Poll::Pending
     }
 }
 
 impl AsyncWrite for TetoTcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        this.cmd_tx
-            .send(FStackCmd::TcpWrite {
-                fd: this.fd,
-                data: buf.to_vec(),
-            })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "F-Stack runtime shut down"))?;
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if !this.shutdown_sent {
-            this.shutdown_sent = true;
-            let _ = this.cmd_tx.send(FStackCmd::TcpClose { fd: this.fd });
+        let conn = &self.conn;
+        let mut st = conn.lock();
+        if let Some(e) = write_error(&st) {
+            return Poll::Ready(Err(e));
         }
-        Poll::Ready(Ok(()))
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if st.tx.len() >= TX_LIMIT {
+            st.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let n = buf.len().min(TX_LIMIT - st.tx.len());
+        st.tx.extend_from_slice(&buf[..n]);
+        conn.notify(&mut st);
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut st = self.conn.lock();
+        if let Some(e) = st.error {
+            return Poll::Ready(Err(e.to_io()));
+        }
+        if st.tx.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+        st.write_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let conn = &self.conn;
+        let mut st = conn.lock();
+        if st.wr_shutdown == WriteShutdown::Done {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(e) = st.error {
+            return Poll::Ready(Err(e.to_io()));
+        }
+        if st.wr_shutdown == WriteShutdown::Open {
+            st.wr_shutdown = WriteShutdown::Requested;
+            conn.notify(&mut st);
+        }
+        st.write_waker = Some(cx.waker().clone());
+        Poll::Pending
     }
 }
 
 impl Drop for TetoTcpStream {
     fn drop(&mut self) {
-        if !self.shutdown_sent {
-            let _ = self.cmd_tx.send(FStackCmd::TcpClose { fd: self.fd });
-        }
+        let conn = &self.conn;
+        let mut st = conn.lock();
+        st.dropped = true;
+        st.read_waker = None;
+        st.write_waker = None;
+        conn.notify(&mut st);
     }
 }

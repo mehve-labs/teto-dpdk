@@ -7,16 +7,19 @@
 ///
 /// Docker / TAP development:
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::for_docker();
 /// ```
 ///
 /// Bare metal with a real NIC bound via VFIO:
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::for_bare_metal();
 /// ```
 ///
 /// Custom build:
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::new("config.ini")
 ///     .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
 ///     .with_eal_arg("--no-pci");
@@ -107,6 +110,7 @@ impl FStackConfig {
 /// methods to override specific values.
 ///
 /// ```rust
+/// # use teto_dpdk::config::TcpSocketOptions;
 /// let opts = TcpSocketOptions::default()
 ///     .nodelay(true)
 ///     .keepalive(true)
@@ -150,9 +154,8 @@ pub struct TcpSocketOptions {
     /// the stack drains in the background.
     pub linger_secs: Option<u32>,
 
-    /// Disable delayed ACKs — acknowledge segments immediately instead of
-    /// waiting up to 40ms to piggyback the ACK on outgoing data.
-    /// Complementary to `nodelay` for lowest latency.
+    /// Not supported: F-Stack has no `TCP_QUICKACK` (it is Linux-only), so
+    /// binding with this set fails with [`std::io::ErrorKind::Unsupported`].
     pub quickack: Option<bool>,
 
     /// Allow multiple sockets to bind the same address:port combination.
@@ -169,22 +172,19 @@ impl TcpSocketOptions {
     pub fn recv_buf(mut self, v: u32) -> Self { self.recv_buf = Some(v); self }
     pub fn send_buf(mut self, v: u32) -> Self { self.send_buf = Some(v); self }
     pub fn linger_secs(mut self, v: u32) -> Self { self.linger_secs = Some(v); self }
+    #[deprecated(note = "F-Stack does not support TCP_QUICKACK; binding with it set fails")]
     pub fn quickack(mut self, v: bool) -> Self { self.quickack = Some(v); self }
     pub fn reuse_port(mut self, v: bool) -> Self { self.reuse_port = Some(v); self }
 
-    /// Convert to the flat cxx-bridge struct. `-1` encodes "not set / use FreeBSD default".
-    pub fn to_ffi(&self) -> crate::fstack::ffi::TcpSocketOptionsFfi {
-        crate::fstack::ffi::TcpSocketOptionsFfi {
-            nodelay:                 self.nodelay.map_or(-1, |v| v as i32),
-            keepalive:               self.keepalive.map_or(-1, |v| v as i32),
-            keepalive_idle_secs:     self.keepalive_idle_secs.map_or(-1, |v| v as i32),
-            keepalive_interval_secs: self.keepalive_interval_secs.map_or(-1, |v| v as i32),
-            keepalive_count:         self.keepalive_count.map_or(-1, |v| v as i32),
-            recv_buf:                self.recv_buf.map_or(-1, |v| v as i32),
-            send_buf:                self.send_buf.map_or(-1, |v| v as i32),
-            linger_secs:             self.linger_secs.map_or(-1, |v| v as i32),
-            quickack:                self.quickack.map_or(-1, |v| v as i32),
-            reuse_port:              self.reuse_port.map_or(-1, |v| v as i32),
+    /// Check for options F-Stack cannot honour. Called by the bind functions;
+    /// exposed so callers can fail fast before initialising F-Stack.
+    pub fn validate(&self) -> std::io::Result<()> {
+        if self.quickack.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "TCP_QUICKACK is not supported by F-Stack",
+            ));
         }
+        Ok(())
     }
 }

@@ -1,76 +1,44 @@
 #pragma once
 
+// Thin shim over F-Stack's ff_* API. Every socket call returns either a
+// non-negative result or `-errno`; no callbacks, no state. All policy lives in
+// Rust (src/net.rs, src/event.rs, src/runtime.rs).
+
 #include "rust/cxx.h"
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <utility>
+#include <cstddef>
+#include <cstdint>
 
 namespace teto {
 
-struct UdpMessage;
-struct TcpMessage;
-struct TcpSocketOptionsFfi;
+struct KEvent;
+struct LoopCtx;
+enum class SockOpt : ::std::int32_t;
 
-class FStackUdpSocket {
-public:
-    FStackUdpSocket(const rust::String& ip, uint16_t port, rust::Fn<void(int32_t, const UdpMessage&)> callback);
-    ~FStackUdpSocket();
+// Runtime. `init` throws (-> Rust `Err`) on failure.
+void init(const rust::Vec<rust::String>& config_args,
+          const rust::Vec<rust::String>& eal_args);
+void run(LoopCtx& ctx);
+void stop();
 
-    void send_to(rust::Slice<const uint8_t> payload, const rust::String& dest_ip, uint16_t dest_port) const;
-    void read_available() const;
-    int fd() const { return fd_; }
+// Sockets (IPv4 only; addresses in host byte order).
+int32_t sock_tcp();
+int32_t sock_udp();
+int32_t sock_set_nonblocking(int32_t fd);
+int32_t sock_set_opt(int32_t fd, SockOpt opt, int32_t value);
+int32_t sock_bind_v4(int32_t fd, uint32_t ip, uint16_t port);
+int32_t sock_listen(int32_t fd, int32_t backlog);
+int32_t sock_accept_v4(int32_t fd, uint32_t& ip, uint16_t& port);
+int32_t sock_local_addr_v4(int32_t fd, uint32_t& ip, uint16_t& port);
+int64_t sock_read(int32_t fd, uint8_t* buf, size_t len);
+int64_t sock_write(int32_t fd, rust::Slice<const uint8_t> buf);
+int64_t sock_recvfrom_v4(int32_t fd, uint8_t* buf, size_t len, uint32_t& ip, uint16_t& port);
+int64_t sock_sendto_v4(int32_t fd, rust::Slice<const uint8_t> buf, uint32_t ip, uint16_t port);
+int32_t sock_shutdown(int32_t fd, int32_t how);
+int32_t sock_close(int32_t fd);
 
-private:
-    int fd_;
-    rust::Fn<void(int32_t, const UdpMessage&)> callback_;
-};
-
-class FStackTcpListener {
-public:
-    FStackTcpListener(
-        const rust::String& ip,
-        uint16_t port,
-        const TcpSocketOptionsFfi& opts,
-        rust::Fn<void(int32_t, const rust::String&, uint16_t)> on_connect,
-        rust::Fn<void(int32_t, const TcpMessage&)>             on_data,
-        rust::Fn<void(int32_t)>                                on_disconnect
-    );
-    ~FStackTcpListener();
-
-    void accept_new() const;
-    void read_all() const;
-    void send_to(int32_t fd, rust::Slice<const uint8_t> payload) const;
-    void close_connection(int32_t fd) const;
-    int listen_fd() const { return listen_fd_; }
-
-private:
-    int listen_fd_;
-    mutable std::unordered_map<int, std::pair<std::string, uint16_t>> connections_;
-    std::unique_ptr<TcpSocketOptionsFfi> opts_;
-    rust::Fn<void(int32_t, const rust::String&, uint16_t)> on_connect_;
-    rust::Fn<void(int32_t, const TcpMessage&)>             on_data_;
-    rust::Fn<void(int32_t)>                                on_disconnect_;
-};
-
-void init_fstack(const rust::Vec<rust::String>& config_args,
-                 const rust::Vec<rust::String>& eal_args);
-
-void run_fstack(const FStackUdpSocket& socket);
-void run_fstack_tcp(const FStackTcpListener& listener);
-
-std::unique_ptr<FStackUdpSocket> create_udp_socket(const rust::String& ip, uint16_t port, rust::Fn<void(int32_t, const UdpMessage&)> callback);
-
-std::unique_ptr<FStackTcpListener> create_tcp_listener(
-    const rust::String& ip,
-    uint16_t port,
-    const TcpSocketOptionsFfi& opts,
-    rust::Fn<void(int32_t, const rust::String&, uint16_t)> on_connect,
-    rust::Fn<void(int32_t, const TcpMessage&)>             on_data,
-    rust::Fn<void(int32_t)>                                on_disconnect
-);
-
-void set_tcp_tick_callback(rust::Fn<void()> cb);
-void set_udp_tick_callback(rust::Fn<void()> cb);
+// kqueue. `kq_poll` never blocks.
+int32_t kq_create();
+int32_t kq_change(int32_t kq, const KEvent& change);
+int32_t kq_poll(int32_t kq, rust::Slice<KEvent> events);
 
 } // namespace teto

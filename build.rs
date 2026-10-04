@@ -7,16 +7,14 @@ fn main() {
         return;
     }
 
-    println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=src/config.rs");
-    println!("cargo:rerun-if-changed=src/fstack.rs");
+    println!("cargo:rerun-if-changed=src/sys.rs");
     println!("cargo:rerun-if-changed=cxx_layer/fstack_wrapper.h");
     println!("cargo:rerun-if-changed=cxx_layer/fstack_wrapper.cpp");
 
     println!("cargo:rustc-link-search=native=/opt/f-stack/lib");
     println!("cargo:rustc-link-lib=static=fstack");
 
-    let mut build = cxx_build::bridge("src/fstack.rs");
+    let mut build = cxx_build::bridge("src/sys.rs");
 
     build
         .file("cxx_layer/fstack_wrapper.cpp")

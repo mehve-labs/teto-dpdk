@@ -1,10 +1,10 @@
-/// Async UDP echo server using F-Stack + Tokio.
-///
-/// Run with:
-///   cargo run -p teto-tokio --example udp_echo_async
-///
-/// Test from inside the container:
-///   echo "Hello Teto!" | nc -u -w1 10.0.0.1 8080
+//! Async UDP echo server using F-Stack + Tokio.
+//!
+//! Run with:
+//!   cargo run -p teto-tokio --example udp_echo_async
+//!
+//! Test from inside the container:
+//!   echo "Hello Teto!" | nc -u -w1 10.0.0.1 8080
 
 use teto_dpdk::config::FStackConfig;
 use teto_tokio::TetoUdpSocket;
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:8080".parse()?;
 
     println!("Starting async UDP echo server on {addr}...");
-    let mut socket = TetoUdpSocket::bind(cfg, addr).await?;
+    let socket = TetoUdpSocket::bind(cfg, addr).await?;
     println!("Bound — ready for packets.");
 
     let mut buf = [0u8; 65535];

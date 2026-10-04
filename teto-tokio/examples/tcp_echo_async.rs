@@ -1,10 +1,10 @@
-/// Async TCP echo server using F-Stack + Tokio.
-///
-/// Run with:
-///   cargo run -p teto-tokio --example tcp_echo_async
-///
-/// Test from inside the container:
-///   echo "Hello Teto!" | nc -w3 10.0.0.1 8080
+//! Async TCP echo server using F-Stack + Tokio.
+//!
+//! Run with:
+//!   cargo run -p teto-tokio --example tcp_echo_async
+//!
+//! Test from inside the container:
+//!   echo "Hello Teto!" | nc -w3 10.0.0.1 8080
 
 use teto_dpdk::config::{FStackConfig, TcpSocketOptions};
 use teto_tokio::TetoTcpListener;
@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = FStackConfig::for_docker();
     let addr = "0.0.0.0:8080".parse()?;
-    let opts = TcpSocketOptions::default().nodelay(true).quickack(true);
+    let opts = TcpSocketOptions::default().nodelay(true);
 
     println!("Starting async TCP echo server on {addr}...");
     let mut listener = TetoTcpListener::bind(cfg, addr, opts).await?;
