@@ -7,7 +7,7 @@
 //!   echo "Hello Teto!" | nc -w3 10.0.0.1 8080
 
 use teto_dpdk::config::{FStackConfig, TcpSocketOptions};
-use teto_tokio::TetoTcpListener;
+use teto_tokio::{TetoRuntime, TetoTcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
@@ -17,7 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = TcpSocketOptions::default().nodelay(true);
 
     println!("Starting async TCP echo server on {addr}...");
-    let mut listener = TetoTcpListener::bind(cfg, addr, opts).await?;
+    let rt = TetoRuntime::start(cfg).await?;
+    let mut listener = TetoTcpListener::bind(&rt, addr, opts).await?;
     println!("Listening — ready for connections.");
 
     loop {

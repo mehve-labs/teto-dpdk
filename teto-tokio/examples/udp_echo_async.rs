@@ -7,7 +7,7 @@
 //!   echo "Hello Teto!" | nc -u -w1 10.0.0.1 8080
 
 use teto_dpdk::config::FStackConfig;
-use teto_tokio::TetoUdpSocket;
+use teto_tokio::{TetoRuntime, TetoUdpSocket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,7 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:8080".parse()?;
 
     println!("Starting async UDP echo server on {addr}...");
-    let socket = TetoUdpSocket::bind(cfg, addr).await?;
+    let rt = TetoRuntime::start(cfg).await?;
+    let socket = TetoUdpSocket::bind(&rt, addr).await?;
     println!("Bound — ready for packets.");
 
     let mut buf = [0u8; 65535];

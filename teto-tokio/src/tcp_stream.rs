@@ -7,7 +7,11 @@ use std::task::{Context, Poll};
 use bytes::Buf;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use teto_dpdk::TcpSocketOptions;
+
 use crate::conn::{Conn, ConnState, WriteShutdown, RX_LOW, TX_LIMIT};
+use crate::driver::Connected;
+use crate::runtime::{Cmd, TetoRuntime};
 
 /// An async TCP stream backed by an F-Stack connection.
 ///
@@ -34,11 +38,26 @@ pub struct TetoTcpStream {
     conn: Arc<Conn>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    _rt: TetoRuntime,
 }
 
 impl TetoTcpStream {
-    pub(crate) fn new(conn: Arc<Conn>, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
-        Self { conn, peer_addr, local_addr }
+    /// Open a connection to `addr` (IPv4 only). `opts` are applied before
+    /// connecting. Fails with the connect error, e.g.
+    /// [`ConnectionRefused`](io::ErrorKind::ConnectionRefused); an
+    /// unreachable peer times out after F-Stack's SYN retries (over a
+    /// minute), so wrap it in `tokio::time::timeout` if that matters —
+    /// cancelling closes the half-open socket.
+    pub async fn connect(rt: &TetoRuntime, addr: SocketAddr, opts: TcpSocketOptions) -> io::Result<Self> {
+        crate::require_v4(addr)?;
+        opts.validate()?;
+        let connected = rt.call(|reply| Cmd::Connect { addr, opts, reply }).await?;
+        Ok(Self::from_connected(connected, rt.clone()))
+    }
+
+    pub(crate) fn from_connected(connected: Connected, rt: TetoRuntime) -> Self {
+        let (peer_addr, local_addr) = (connected.peer, connected.local);
+        Self { conn: connected.take_conn(), peer_addr, local_addr, _rt: rt }
     }
 
     /// Called when the application takes the stream from the accept queue.

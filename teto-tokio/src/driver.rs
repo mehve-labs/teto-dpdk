@@ -1,6 +1,7 @@
-//! Runs on the F-Stack thread: accepts connections, moves bytes between
-//! F-Stack sockets and the per-connection buffers in `conn.rs`, and wakes tokio
-//! tasks.
+//! Runs on the F-Stack thread: executes commands from `TetoRuntime` handles
+//! (listen, bind, connect), accepts connections, moves bytes between F-Stack
+//! sockets and the per-connection buffers in `conn.rs`, drives UDP sockets,
+//! and wakes tokio tasks.
 
 use std::collections::HashMap;
 use std::io;
@@ -9,29 +10,54 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Buf;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
+use tokio::sync::{mpsc, oneshot};
 
 use teto_dpdk::event::{Event, Events, Interest, Kqueue};
-use teto_dpdk::net::{TcpListener, TcpStream};
-use teto_dpdk::{FStack, TcpSocketOptions};
+use teto_dpdk::net::{TcpListener, TcpStream, UdpSocket};
+use teto_dpdk::FStack;
 
 use crate::conn::{Conn, ConnError, ConnState, Notifier, Wakes, WriteShutdown, RX_HIGH, RX_LOW, TX_LIMIT};
-use crate::tcp_stream::TetoTcpStream;
+use crate::runtime::Cmd;
+use crate::udp_socket::UdpEntry;
 
-pub(crate) type AcceptItem = io::Result<(TetoTcpStream, SocketAddr)>;
-
-const LISTENER_TOKEN: u64 = 0;
 const READ_CHUNK: usize = 64 * 1024;
 const EVENTS_CAPACITY: usize = 1024;
 /// How long a dropped stream may take to get its data acknowledged by the
-/// peer before it is closed regardless.
+/// peer before it is aborted.
 const DROP_GRACE: Duration = Duration::from_secs(30);
 const DEADLINE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// How long the loop keeps running after the last socket is gone, so final
 /// FINs/ACKs (and anything F-Stack is batching) actually leave: stopping the
 /// loop tears F-Stack down and discards whatever it still holds.
-pub(crate) const STOP_GRACE: Duration = Duration::from_secs(1);
+const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// A connection handed to the tokio side (from `accept` or `connect`). If it
+/// is dropped before becoming a `TetoTcpStream` — left in an accept queue, or
+/// a cancelled `connect` — the connection is closed like a dropped stream.
+pub(crate) struct Connected {
+    conn: Option<Arc<Conn>>,
+    pub peer: SocketAddr,
+    pub local: SocketAddr,
+}
+
+impl Connected {
+    pub(crate) fn take_conn(mut self) -> Arc<Conn> {
+        self.conn.take().expect("connection already taken")
+    }
+}
+
+impl Drop for Connected {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut st = conn.lock();
+            st.dropped = true;
+            conn.notify(&mut st);
+        }
+    }
+}
+
+pub(crate) type AcceptItem = io::Result<Connected>;
 
 struct Entry {
     stream: TcpStream,
@@ -39,20 +65,36 @@ struct Entry {
     interest: Interest,
 }
 
+struct ListenerEntry {
+    listener: TcpListener,
+    local: SocketAddr,
+    accept_tx: mpsc::Sender<AcceptItem>,
+    /// Not registered with the kqueue because the accept queue is full or
+    /// accepting just failed; re-registered once the queue has been drained.
+    paused: bool,
+}
+
+struct Connecting {
+    stream: TcpStream,
+    reply: oneshot::Sender<io::Result<Connected>>,
+}
+
 enum Outcome {
     Keep,
     Close(Option<ConnError>),
 }
 
-pub(crate) struct TcpDriver {
+pub(crate) struct Driver {
+    fs: FStack,
     kq: Kqueue,
-    /// `None` once the application dropped the `TetoTcpListener`; the
-    /// listening socket is then closed so new clients are refused.
-    listener: Option<TcpListener>,
-    local_addr: SocketAddr,
-    accept_tx: mpsc::Sender<AcceptItem>,
-    accept_paused: bool,
+    cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    /// Every `TetoRuntime` handle (and so every socket) has been dropped.
+    handles_gone: bool,
+    listeners: HashMap<u64, ListenerEntry>,
     conns: HashMap<u64, Entry>,
+    connecting: HashMap<u64, Connecting>,
+    udp: HashMap<u64, UdpEntry>,
+    /// Kqueue token and connection id source; never reused.
     next_id: u64,
     notifier: Arc<Notifier>,
     notified: Vec<u64>,
@@ -65,25 +107,18 @@ pub(crate) struct TcpDriver {
     idle_since: Option<Instant>,
 }
 
-impl TcpDriver {
-    pub(crate) fn new(
-        fs: &FStack,
-        addr: SocketAddr,
-        opts: &TcpSocketOptions,
-        accept_tx: mpsc::Sender<AcceptItem>,
-    ) -> io::Result<Self> {
-        let listener = TcpListener::bind(fs, addr, opts)?;
-        let local_addr = listener.local_addr()?.into();
-        let kq = Kqueue::new(fs)?;
-        kq.register(&listener, LISTENER_TOKEN, Interest::READABLE)?;
-        Ok(TcpDriver {
-            kq,
-            listener: Some(listener),
-            local_addr,
-            accept_tx,
-            accept_paused: false,
+impl Driver {
+    pub(crate) fn new(fs: FStack, cmd_rx: mpsc::UnboundedReceiver<Cmd>) -> io::Result<Self> {
+        Ok(Driver {
+            fs,
+            kq: Kqueue::new(&fs)?,
+            cmd_rx,
+            handles_gone: false,
+            listeners: HashMap::new(),
             conns: HashMap::new(),
-            next_id: LISTENER_TOKEN + 1,
+            connecting: HashMap::new(),
+            udp: HashMap::new(),
+            next_id: 1,
             notifier: Arc::new(Notifier::default()),
             notified: Vec::new(),
             events: Events::with_capacity(EVENTS_CAPACITY),
@@ -94,14 +129,18 @@ impl TcpDriver {
         })
     }
 
-    pub(crate) fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// One poll-loop iteration. Never blocks. Returns `false` once nothing
-    /// can use the runtime any more (listener dropped, no connections left)
+    /// can use the runtime any more (all handles dropped, every socket gone)
     /// or it failed; the caller then stops the loop.
     pub(crate) fn tick(&mut self) -> bool {
+        self.run_commands();
+
         let mut notified = std::mem::take(&mut self.notified);
         self.notifier.drain_into(&mut notified);
         for id in notified.drain(..) {
@@ -109,21 +148,12 @@ impl TcpDriver {
         }
         self.notified = notified;
 
-        // The application dropped the listener: close the socket so new
-        // clients are refused instead of queued forever.
-        if self.listener.is_some() && self.accept_tx.is_closed() {
-            self.listener = None;
-            self.drop_unaccepted();
-        }
-
-        // Resume accepting once the application has drained the accept queue.
-        if self.accept_paused
-            && self.accept_tx.capacity() == self.accept_tx.max_capacity()
-            && let Some(listener) = &self.listener
-            && self.kq.register(listener, LISTENER_TOKEN, Interest::READABLE).is_ok()
-        {
-            self.accept_paused = false;
-        }
+        self.maintain_listeners();
+        self.maintain_connecting();
+        self.udp.retain(|_, u| {
+            u.tick();
+            !u.finished()
+        });
 
         if let Err(e) = self.kq.poll(&mut self.events) {
             // Can't happen while F-Stack runs; if it does, fail every stream
@@ -134,20 +164,21 @@ impl TcpDriver {
         let mut ready = std::mem::take(&mut self.ready);
         ready.extend(self.events.iter());
         for ev in ready.drain(..) {
-            if ev.token() == LISTENER_TOKEN {
-                self.accept_ready();
-                continue;
-            }
-            if ev.is_send_empty() {
+            let id = ev.token();
+            if self.listeners.contains_key(&id) {
+                self.accept_ready(id);
+            } else if self.connecting.contains_key(&id) {
+                self.finish_connect(id);
+            } else if ev.is_send_empty() {
                 // A dropped stream's data (and FIN) has been acknowledged.
-                self.close(ev.token(), None);
-                continue;
-            }
-            if ev.is_readable() {
-                self.on_readable(ev.token());
-            }
-            if ev.is_writable() {
-                self.on_writable(ev.token());
+                self.close(id, None);
+            } else {
+                if ev.is_readable() {
+                    self.on_readable(id);
+                }
+                if ev.is_writable() {
+                    self.on_writable(id);
+                }
             }
         }
         self.ready = ready;
@@ -157,7 +188,12 @@ impl TcpDriver {
             self.abort_overdue();
         }
 
-        if self.listener.is_some() || !self.conns.is_empty() {
+        let busy = !self.handles_gone
+            || !self.listeners.is_empty()
+            || !self.conns.is_empty()
+            || !self.connecting.is_empty()
+            || !self.udp.is_empty();
+        if busy {
             self.idle_since = None;
             return true;
         }
@@ -165,43 +201,112 @@ impl TcpDriver {
         idle_since.elapsed() < STOP_GRACE
     }
 
-    /// With the listener gone nobody can accept these any more (normally
-    /// they were dropped with the channel; this catches one pushed into it
-    /// just as the receiver was dropped).
-    fn drop_unaccepted(&mut self) {
-        let ids: Vec<u64> = self.conns.keys().copied().collect();
-        for id in ids {
-            let Some(entry) = self.conns.get(&id) else { continue };
-            let mut st = entry.conn.lock();
-            if !st.accepted && !st.dropped {
-                st.dropped = true;
-                st.notified = false;
-                drop(st);
-                self.service(id);
+    fn run_commands(&mut self) {
+        loop {
+            match self.cmd_rx.try_recv() {
+                Ok(cmd) => self.run_command(cmd),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.handles_gone = true;
+                    return;
+                }
             }
         }
     }
 
-    fn accept_ready(&mut self) {
-        let Some(listener) = &self.listener else { return };
+    fn run_command(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::ListenTcp { addr, opts, accept_tx, reply } => {
+                let id = self.next_id();
+                let listening = TcpListener::bind(&self.fs, addr, &opts).and_then(|listener| {
+                    let local = listener.local_addr()?.into();
+                    self.kq.register(&listener, id, Interest::READABLE)?;
+                    Ok((listener, local))
+                });
+                match listening {
+                    Ok((listener, local)) => {
+                        if reply.send(Ok(local)).is_ok() {
+                            self.listeners
+                                .insert(id, ListenerEntry { listener, local, accept_tx, paused: false });
+                        }
+                    }
+                    Err(e) => drop(reply.send(Err(e))),
+                }
+            }
+            Cmd::BindUdp { addr, parts, reply } => {
+                let bound = UdpSocket::bind(&self.fs, addr).and_then(|s| {
+                    let local = s.local_addr()?.into();
+                    Ok((s, local))
+                });
+                match bound {
+                    Ok((socket, local)) => {
+                        if reply.send(Ok(local)).is_ok() {
+                            let id = self.next_id();
+                            self.udp.insert(id, UdpEntry::new(socket, parts));
+                        }
+                    }
+                    Err(e) => drop(reply.send(Err(e))),
+                }
+            }
+            Cmd::Connect { addr, opts, reply } => {
+                let id = self.next_id();
+                let started = TcpStream::connect(&self.fs, addr, &opts).and_then(|stream| {
+                    self.kq.register(&stream, id, Interest::WRITABLE)?;
+                    Ok(stream)
+                });
+                match started {
+                    Ok(stream) => {
+                        self.connecting.insert(id, Connecting { stream, reply });
+                    }
+                    Err(e) => drop(reply.send(Err(e))),
+                }
+            }
+        }
+    }
+
+    /// Close listeners the application dropped (so new clients are refused
+    /// instead of queued forever) and resume paused ones.
+    fn maintain_listeners(&mut self) {
+        let mut closed = Vec::new();
+        for (&id, l) in &mut self.listeners {
+            if l.accept_tx.is_closed() {
+                closed.push(id);
+            } else if l.paused
+                && l.accept_tx.capacity() == l.accept_tx.max_capacity()
+                && self.kq.register(&l.listener, id, Interest::READABLE).is_ok()
+            {
+                l.paused = false;
+            }
+        }
+        for id in closed {
+            self.listeners.remove(&id);
+        }
+    }
+
+    /// Abandon connects whose caller gave up (e.g. a timeout dropped the
+    /// future); dropping the socket closes it.
+    fn maintain_connecting(&mut self) {
+        self.connecting.retain(|_, c| !c.reply.is_closed());
+    }
+
+    fn accept_ready(&mut self, listener_id: u64) {
+        let Some(l) = self.listeners.get_mut(&listener_id) else { return };
         // `Some(closed)`: stop accepting for now (`closed` = for good).
         let stop = loop {
-            let permit = match self.accept_tx.try_reserve() {
+            let permit = match l.accept_tx.try_reserve() {
                 Ok(p) => p,
                 Err(TrySendError::Full(())) => break Some(false),
                 Err(TrySendError::Closed(())) => break Some(true),
             };
-            match listener.accept() {
+            match l.listener.accept() {
                 Ok((stream, peer)) => {
                     let id = self.next_id;
                     self.next_id += 1;
                     // Not registered until the application accepts it (see
                     // `desired_interest`), so queued connections don't buffer.
                     let conn = Arc::new(Conn::new(id, self.notifier.clone()));
-                    let peer = SocketAddr::V4(peer);
-                    let teto = TetoTcpStream::new(conn.clone(), peer, self.local_addr);
-                    self.conns.insert(id, Entry { stream, conn, interest: Interest::NONE });
-                    permit.send(Ok((teto, peer)));
+                    self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::NONE });
+                    permit.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local: l.local }));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break None,
                 // The client went away before or during setup (the failed
@@ -222,17 +327,36 @@ impl TcpDriver {
         };
         match stop {
             Some(true) => {
-                // The application dropped the listener: close the socket so
-                // new clients are refused instead of queued forever.
-                self.listener = None;
-                self.drop_unaccepted();
+                self.listeners.remove(&listener_id);
             }
             Some(false) => {
-                let _ = self.kq.deregister(listener);
-                self.accept_paused = true;
+                let _ = self.kq.deregister(&l.listener);
+                l.paused = true;
             }
             None => {}
         }
+    }
+
+    fn finish_connect(&mut self, id: u64) {
+        let Some(Connecting { stream, reply }) = self.connecting.remove(&id) else { return };
+        let connected = match stream.take_error() {
+            Ok(None) => stream.local_addr(),
+            Ok(Some(e)) | Err(e) => Err(e),
+        };
+        let local = match connected {
+            Ok(local) => local,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let peer = stream.peer_addr();
+        let conn = Arc::new(Conn::new(id, self.notifier.clone()));
+        conn.lock().accepted = true;
+        self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::NONE });
+        // If the caller is gone, `Connected`'s drop marks the stream dropped.
+        let _ = reply.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local: local.into() }));
+        self.service(id);
     }
 
     fn service(&mut self, id: u64) {
@@ -321,10 +445,12 @@ impl TcpDriver {
     }
 }
 
-impl Drop for TcpDriver {
+impl Drop for Driver {
     fn drop(&mut self) {
         // The poll loop is gone (normally only on panic): fail every stream
-        // instead of leaving its tasks waiting forever.
+        // instead of leaving its tasks waiting forever. Pending connects,
+        // accept queues and UDP channels are dropped, which their tokio
+        // sides report as "runtime stopped".
         for entry in self.conns.values() {
             let mut st = entry.conn.lock();
             st.error.get_or_insert(ConnError::RuntimeGone);

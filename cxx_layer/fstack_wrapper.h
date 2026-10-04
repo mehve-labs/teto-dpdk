@@ -27,6 +27,8 @@ int32_t sock_set_nonblocking(int32_t fd);
 int32_t sock_set_opt(int32_t fd, SockOpt opt, int32_t value);
 int32_t sock_bind_v4(int32_t fd, uint32_t ip, uint16_t port);
 int32_t sock_listen(int32_t fd, int32_t backlog);
+int32_t sock_connect_v4(int32_t fd, uint32_t ip, uint16_t port);
+int32_t sock_take_error(int32_t fd);
 int32_t sock_accept_v4(int32_t fd, uint32_t& ip, uint16_t& port);
 int32_t sock_local_addr_v4(int32_t fd, uint32_t& ip, uint16_t& port);
 int64_t sock_read(int32_t fd, uint8_t* buf, size_t len);

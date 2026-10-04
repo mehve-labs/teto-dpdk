@@ -11,8 +11,9 @@
 
 | Type | Description |
 |------|-------------|
+| `TetoRuntime` | Starts the F-Stack thread; everything else is created from it. |
 | `TetoTcpListener` | Accept incoming TCP connections. |
-| `TetoTcpStream` | Bidirectional TCP stream implementing `AsyncRead + AsyncWrite`. |
+| `TetoTcpStream` | Bidirectional TCP stream implementing `AsyncRead + AsyncWrite`; accepted, or opened with `connect`. |
 | `TetoUdpSocket` | Send and receive UDP datagrams. |
 
 All I/O runs on `teto-dpdk`'s dedicated F-Stack/DPDK poll-mode thread, bypassing the Linux kernel network stack entirely.

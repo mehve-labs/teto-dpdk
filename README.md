@@ -16,7 +16,7 @@ Two crates are provided:
 | Crate | Description |
 |-------|-------------|
 | [`teto-dpdk`](https://crates.io/crates/teto-dpdk) | Low-level F-Stack bindings: non-blocking sockets and a kqueue poller, run on F-Stack's own poll loop. Use this when you want to drive the event loop yourself. |
-| [`teto-tokio`](https://crates.io/crates/teto-tokio) | Async adapter: `TetoTcpListener`, `TetoTcpStream` (`AsyncRead + AsyncWrite`), `TetoUdpSocket`. Familiar tokio-style API over teto-dpdk's F-Stack thread. |
+| [`teto-tokio`](https://crates.io/crates/teto-tokio) | Async adapter: `TetoRuntime`, `TetoTcpListener`, `TetoTcpStream` (`AsyncRead + AsyncWrite`, inbound and outbound), `TetoUdpSocket`. Familiar tokio-style API over teto-dpdk's F-Stack thread. |
 
 ## Architecture
 
@@ -65,7 +65,7 @@ teto-dpdk = "0.1"
 ```
 
 ```rust
-use teto_tokio::TetoTcpListener;
+use teto_tokio::{TetoRuntime, TetoTcpListener};
 use teto_dpdk::config::{FStackConfig, TcpSocketOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -73,7 +73,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn main() -> std::io::Result<()> {
     let cfg = FStackConfig::for_docker();
     let opts = TcpSocketOptions::default().nodelay(true);
-    let mut listener = TetoTcpListener::bind(cfg, "0.0.0.0:8080".parse().unwrap(), opts).await?;
+    let rt = TetoRuntime::start(cfg).await?;
+    let mut listener = TetoTcpListener::bind(&rt, "0.0.0.0:8080".parse().unwrap(), opts).await?;
 
     loop {
         let (mut stream, peer) = listener.accept().await?;
@@ -97,7 +98,8 @@ Behaviour worth knowing:
 - **Backpressure.** Each connection buffers at most 256 KiB in each direction between tokio and the F-Stack thread. `write` returns `Pending` when the send buffer is full; when your task falls behind on reads, the F-Stack thread stops reading the socket and TCP flow control slows the peer down. `flush` completes once F-Stack has accepted everything written.
 - **Half-close.** `read` returning `Ok(0)` means the peer shut down its write side; you can still write a reply. `shutdown()` flushes and sends FIN.
 - **Errors.** A reset connection fails reads and writes with `ConnectionReset`. Dropping a stream closes it gracefully: buffered writes are sent, then FIN, and the socket is released once the peer has acknowledged everything. A peer that doesn't take the data within 30 s gets a reset.
-- **Limits.** IPv4 only. One F-Stack instance per process, so one `TetoTcpListener` *or* one `TetoUdpSocket` per process. No outbound `connect` yet.
+- **Runtime.** `TetoRuntime::start` runs F-Stack on a dedicated thread, once per process. Any number of listeners, UDP sockets and outbound connections (`TetoTcpStream::connect`) can be created from it. A failed bind leaves the runtime usable. The thread exits once every handle and socket has been dropped, after closing connections have delivered their data. F-Stack can't be restarted in the same process.
+- **Limits.** IPv4 only.
 
 ## Low-Level API (teto-dpdk)
 

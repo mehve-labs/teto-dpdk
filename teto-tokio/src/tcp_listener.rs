@@ -1,11 +1,12 @@
 use std::io;
 use std::net::SocketAddr;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-use teto_dpdk::{FStack, FStackConfig, TcpSocketOptions};
+use teto_dpdk::TcpSocketOptions;
 
-use crate::tcp_driver::{AcceptItem, TcpDriver};
+use crate::driver::AcceptItem;
+use crate::runtime::{runtime_stopped, Cmd, TetoRuntime};
 use crate::tcp_stream::TetoTcpStream;
 
 /// Accepted connections waiting for [`TetoTcpListener::accept`]. When full,
@@ -14,22 +15,23 @@ const ACCEPT_QUEUE: usize = 1024;
 
 /// An async TCP listener backed by F-Stack.
 ///
-/// Mirrors the [`tokio::net::TcpListener`](https://docs.rs/tokio/1/tokio/net/struct.TcpListener.html) API. [`bind`](Self::bind)
-/// initialises F-Stack on a dedicated thread and starts listening;
-/// [`accept`](Self::accept) yields [`TetoTcpStream`]s.
+/// Mirrors the [`tokio::net::TcpListener`](https://docs.rs/tokio/1/tokio/net/struct.TcpListener.html)
+/// API: create it from a [`TetoRuntime`] with [`bind`](Self::bind), then
+/// [`accept`](Self::accept) connections as [`TetoTcpStream`]s. Dropping the
+/// listener closes the listening socket; accepted streams keep working.
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use teto_tokio::TetoTcpListener;
+/// use teto_tokio::{TetoRuntime, TetoTcpListener};
 /// use teto_dpdk::config::{FStackConfig, TcpSocketOptions};
 /// use tokio::io::{AsyncReadExt, AsyncWriteExt};
 ///
 /// #[tokio::main]
 /// async fn main() -> std::io::Result<()> {
-///     let cfg = FStackConfig::for_docker();
+///     let rt = TetoRuntime::start(FStackConfig::for_docker()).await?;
 ///     let opts = TcpSocketOptions::default().nodelay(true);
-///     let mut listener = TetoTcpListener::bind(cfg, "0.0.0.0:8080".parse().unwrap(), opts).await?;
+///     let mut listener = TetoTcpListener::bind(&rt, "0.0.0.0:8080".parse().unwrap(), opts).await?;
 ///
 ///     loop {
 ///         let (mut stream, peer) = listener.accept().await?;
@@ -48,74 +50,37 @@ const ACCEPT_QUEUE: usize = 1024;
 pub struct TetoTcpListener {
     accept_rx: mpsc::Receiver<AcceptItem>,
     local_addr: SocketAddr,
-    _thread: std::thread::JoinHandle<()>,
+    rt: TetoRuntime,
+}
+
+impl std::fmt::Debug for TetoTcpListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TetoTcpListener").field("local_addr", &self.local_addr).finish()
+    }
 }
 
 impl TetoTcpListener {
-    /// Initialise F-Stack and start listening on `addr` (IPv4 only).
-    ///
-    /// Spawns a dedicated OS thread that owns the F-Stack poll loop. F-Stack
-    /// can be initialised once per process, so this can be called once, and
-    /// not together with [`TetoUdpSocket::bind`](crate::TetoUdpSocket::bind).
-    /// Initialisation and bind failures are returned as errors. Because
-    /// F-Stack can't be initialised twice, a bind failure (e.g. an address
-    /// not configured in `config.ini`) can't be retried in the same process.
-    ///
-    /// The F-Stack thread exits once the listener and all its streams have
-    /// been dropped; F-Stack can't be restarted afterwards.
-    pub async fn bind(
-        cfg: FStackConfig,
-        addr: SocketAddr,
-        opts: TcpSocketOptions,
-    ) -> io::Result<Self> {
+    /// Listen on `addr` (IPv4 only). `opts` are applied to every accepted
+    /// connection. A failure (e.g. an address not configured in
+    /// `config.ini`) leaves the runtime usable.
+    pub async fn bind(rt: &TetoRuntime, addr: SocketAddr, opts: TcpSocketOptions) -> io::Result<Self> {
         crate::require_v4(addr)?;
         opts.validate()?;
-
         let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
-        let (ready_tx, ready_rx) = oneshot::channel::<io::Result<SocketAddr>>();
-
-        let thread = std::thread::Builder::new()
-            .name("fstack-tcp".into())
-            .spawn(move || {
-                let started = FStack::init(&cfg)
-                    .and_then(|fs| TcpDriver::new(&fs, addr, &opts, accept_tx).map(|d| (fs, d)));
-                let (fs, mut driver) = match started {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                let _ = ready_tx.send(Ok(driver.local_addr()));
-                // Runs until the listener and every stream are dropped (or a
-                // tick panics; the panic then resumes here).
-                let _ = fs.run(|| {
-                    if !driver.tick() {
-                        fs.stop();
-                    }
-                });
-            })?;
-
-        let local_addr = ready_rx.await.map_err(|_| {
-            io::Error::other("F-Stack thread exited during initialisation")
-        })??;
-
-        Ok(TetoTcpListener { accept_rx, local_addr, _thread: thread })
+        let local_addr = rt.call(|reply| Cmd::ListenTcp { addr, opts, accept_tx, reply }).await?;
+        Ok(TetoTcpListener { accept_rx, local_addr, rt: rt.clone() })
     }
 
     /// Accept the next inbound connection.
     ///
-    /// Per-connection failures (e.g. a socket option F-Stack rejected for this
-    /// connection) are returned as errors; the listener stays usable.
+    /// Per-connection failures (e.g. descriptor exhaustion) are returned as
+    /// errors; the listener stays usable.
     pub async fn accept(&mut self) -> io::Result<(TetoTcpStream, SocketAddr)> {
-        match self.accept_rx.recv().await {
-            Some(Ok((stream, peer))) => {
-                stream.mark_accepted();
-                Ok((stream, peer))
-            }
-            Some(Err(e)) => Err(e),
-            None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "F-Stack runtime stopped")),
-        }
+        let connected = self.accept_rx.recv().await.ok_or_else(runtime_stopped)??;
+        let peer = connected.peer;
+        let stream = TetoTcpStream::from_connected(connected, self.rt.clone());
+        stream.mark_accepted();
+        Ok((stream, peer))
     }
 
     pub fn local_addr(&self) -> SocketAddr {

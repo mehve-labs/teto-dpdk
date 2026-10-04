@@ -11,7 +11,7 @@ use std::net::{Shutdown, SocketAddr, TcpStream as StdTcpStream};
 use std::time::{Duration, Instant};
 
 use teto_dpdk::{FStackConfig, TcpSocketOptions};
-use teto_tokio::{TetoTcpListener, TetoTcpStream, TetoUdpSocket};
+use teto_tokio::{TetoRuntime, TetoTcpListener, TetoTcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
@@ -98,23 +98,23 @@ async fn echo_check(server: &mut TetoTcpStream, client: StdTcpStream, msg: &'sta
 fn tcp_suite() {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        // Rejected before F-Stack is touched.
-        let v6 = TetoTcpListener::bind(config(), "[::1]:8080".parse().unwrap(), TcpSocketOptions::default()).await;
+        let rt = TetoRuntime::start(config()).await.expect("start");
+        // F-Stack is a per-process singleton.
+        assert_eq!(TetoRuntime::start(config()).await.unwrap_err().kind(), ErrorKind::AlreadyExists);
+
+        // Rejected before reaching F-Stack.
+        let v6 = TetoTcpListener::bind(&rt, "[::1]:8080".parse().unwrap(), TcpSocketOptions::default()).await;
         assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
         #[allow(deprecated)]
         let quickack = TcpSocketOptions::default().quickack(true);
-        let qa = TetoTcpListener::bind(config(), addr(), quickack).await;
+        let qa = TetoTcpListener::bind(&rt, addr(), quickack).await;
         assert_eq!(qa.err().unwrap().kind(), ErrorKind::Unsupported);
 
         let opts = TcpSocketOptions::default().nodelay(true).keepalive(true);
-        let mut listener = TetoTcpListener::bind(config(), addr(), opts).await.expect("bind");
+        let mut listener = TetoTcpListener::bind(&rt, addr(), opts).await.expect("bind");
         assert_eq!(listener.local_addr(), addr());
-
-        // F-Stack is a per-process singleton.
-        let again = TetoTcpListener::bind(config(), "10.0.0.1:8081".parse().unwrap(), TcpSocketOptions::default()).await;
-        assert_eq!(again.err().unwrap().kind(), ErrorKind::AlreadyExists);
-        let udp = TetoUdpSocket::bind(config(), "10.0.0.1:9000".parse().unwrap()).await;
-        assert_eq!(udp.err().unwrap().kind(), ErrorKind::AlreadyExists);
+        // Only the test's streams and listener keep the runtime alive from here.
+        drop(rt);
 
         wait_until_reachable(&mut listener).await;
 

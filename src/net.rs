@@ -162,7 +162,34 @@ pub struct TcpStream {
     peer: SocketAddrV4,
 }
 
+/// `EINPROGRESS` (Linux numbering, as F-Stack reports it).
+const EINPROGRESS: i32 = 115;
+
 impl TcpStream {
+    /// Start connecting to `addr`. Returns immediately with the connection in
+    /// progress: wait for it to become writable (kqueue `WRITABLE`), then call
+    /// [`take_error`](Self::take_error) — `Ok(None)` means it connected.
+    /// `opts` are applied before connecting.
+    pub fn connect(_fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
+        let addr = require_v4(addr)?;
+        opts.validate()?;
+        let fd = nonblocking_socket(ffi::sock_tcp)?;
+        apply_tcp_options(&fd, opts)?;
+        match cvt32(ffi::sock_connect_v4(fd.get()?, (*addr.ip()).into(), addr.port())) {
+            Ok(_) => {}
+            Err(e) if e.raw_os_error() == Some(EINPROGRESS) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(TcpStream { fd, peer: addr })
+    }
+
+    /// Take the socket's pending error (`SO_ERROR`), e.g. why a connect
+    /// failed. `Ok(None)` if there is none.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        let code = cvt32(ffi::sock_take_error(self.fd.get()?))?;
+        Ok((code != 0).then(|| io::Error::from_raw_os_error(code)))
+    }
+
     /// Read into `buf`. `Ok(0)` means the peer shut down its write side.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         // SAFETY: `buf` is valid for writes of `buf.len()` bytes.

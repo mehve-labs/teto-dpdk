@@ -54,6 +54,9 @@ pub(crate) mod ffi {
         fn sock_set_opt(fd: i32, opt: SockOpt, value: i32) -> i32;
         fn sock_bind_v4(fd: i32, ip: u32, port: u16) -> i32;
         fn sock_listen(fd: i32, backlog: i32) -> i32;
+        fn sock_connect_v4(fd: i32, ip: u32, port: u16) -> i32;
+        /// Pending socket error (positive Linux errno), 0 if none, or -errno.
+        fn sock_take_error(fd: i32) -> i32;
         fn sock_accept_v4(fd: i32, ip: &mut u32, port: &mut u16) -> i32;
         fn sock_local_addr_v4(fd: i32, ip: &mut u32, port: &mut u16) -> i32;
         unsafe fn sock_read(fd: i32, buf: *mut u8, len: usize) -> i64;

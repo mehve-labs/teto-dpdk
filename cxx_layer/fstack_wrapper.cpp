@@ -9,6 +9,8 @@ extern "C" {
 extern int ff_freebsd_init(void);
 extern int ff_dpdk_init(int, char **);
 extern int ff_dpdk_if_up(void);
+// Sets errno to the Linux equivalent of a FreeBSD error number.
+extern void ff_os_errno(int error);
 }
 
 #include <algorithm>
@@ -147,6 +149,25 @@ int32_t sock_bind_v4(int32_t fd, uint32_t ip, uint16_t port) {
 
 int32_t sock_listen(int32_t fd, int32_t backlog) {
     return ret32(ff_listen(fd, backlog));
+}
+
+int32_t sock_connect_v4(int32_t fd, uint32_t ip, uint16_t port) {
+    struct sockaddr_in addr = make_addr(ip, port);
+    return ret32(ff_connect(fd, reinterpret_cast<struct linux_sockaddr*>(&addr), sizeof(addr)));
+}
+
+int32_t sock_take_error(int32_t fd) {
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (ff_getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+        return static_cast<int32_t>(neg_errno());
+    }
+    if (err == 0) {
+        return 0;
+    }
+    // SO_ERROR holds a FreeBSD error number; translate it like ff_* calls do.
+    ff_os_errno(err);
+    return errno != 0 ? errno : EIO;
 }
 
 int32_t sock_accept_v4(int32_t fd, uint32_t& ip, uint16_t& port) {

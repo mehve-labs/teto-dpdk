@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teto_dpdk::FStackConfig;
-use teto_tokio::TetoUdpSocket;
+use teto_tokio::{TetoRuntime, TetoUdpSocket};
 
 fn config() -> FStackConfig {
     FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
@@ -23,10 +23,12 @@ const ADDR: &str = "10.0.0.1:8080";
 fn udp_suite() {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let v6 = TetoUdpSocket::bind(config(), "[::1]:8080".parse().unwrap()).await;
+        let rt = TetoRuntime::start(config()).await.expect("start");
+        let v6 = TetoUdpSocket::bind(&rt, "[::1]:8080".parse().unwrap()).await;
         assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
 
-        let server = Arc::new(TetoUdpSocket::bind(config(), ADDR.parse().unwrap()).await.expect("bind"));
+        let server = Arc::new(TetoUdpSocket::bind(&rt, ADDR.parse().unwrap()).await.expect("bind"));
+        drop(rt);
         let v6 = server.send_to(b"x", "[::1]:9".parse().unwrap()).await;
         assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
 
@@ -112,7 +114,7 @@ fn udp_suite() {
         for i in 0..LAST {
             server.send_to(format!("last-{i}").as_bytes(), client_addr).await.unwrap();
         }
-        drop(Arc::try_unwrap(server).ok().expect("socket still shared"));
+        drop(Arc::try_unwrap(server).expect("socket still shared"));
         let got = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 64];
             let mut n = 0;
