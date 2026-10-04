@@ -23,3 +23,8 @@ echo "::endgroup::"
 echo "::group::test"
 cargo test --workspace
 echo "::endgroup::"
+
+# A separate crate depending on teto-tokio, as a user's application would.
+echo "::group::downstream crate"
+cargo run --manifest-path ci/downstream/Cargo.toml
+echo "::endgroup::"

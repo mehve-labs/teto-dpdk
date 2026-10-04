@@ -195,7 +195,8 @@ teto-dpdk/                          (Cargo workspace root)
 │       ├── kernel_echo.rs      # Same echo on tokio::net, as a benchmark baseline
 │       └── bench_client.rs     # RTT / throughput client
 ├── scripts/bench.sh        # teto vs kernel echo benchmark
-├── build.rs                # Links F-Stack, DPDK, and the cxx layer
+├── build.rs                # Builds the cxx layer; emits F-Stack/DPDK link settings that reach dependents
+├── ci/downstream/          # Out-of-workspace crate CI builds to check downstream linking
 ├── config.ini              # F-Stack / DPDK configuration (Docker/TAP)
 ├── Dockerfile              # Builds DPDK + F-Stack from source
 ├── entrypoint.sh           # Configures the kernel-side TAP device

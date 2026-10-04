@@ -1,0 +1,15 @@
+# A crate outside the workspace that depends on teto-tokio the way a user's
+# application would. CI builds and runs it to check that teto's link settings
+# reach dependents (build-script link *args* only apply to the package itself).
+[package]
+name = "teto-downstream-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+teto-dpdk = { path = "../.." }
+teto-tokio = { path = "../../teto-tokio" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[workspace]
