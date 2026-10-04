@@ -205,6 +205,18 @@ int32_t sock_shutdown(int32_t fd, int32_t how) {
     return ret32(ff_shutdown(fd, how));
 }
 
+int32_t sock_unsent(int32_t fd) {
+    // FreeBSD's FIONWRITE: bytes in the send buffer, i.e. not yet
+    // acknowledged by the peer. ff_ioctl would translate Linux request
+    // numbers, and Linux has no FIONWRITE, so use the FreeBSD entry point.
+    const unsigned long FREEBSD_FIONWRITE = 0x40046677UL; // _IOR('f', 119, int)
+    int n = 0;
+    if (ff_ioctl_freebsd(fd, FREEBSD_FIONWRITE, &n) < 0) {
+        return static_cast<int32_t>(neg_errno());
+    }
+    return n;
+}
+
 int32_t sock_close(int32_t fd) {
     return ret32(ff_close(fd));
 }

@@ -6,7 +6,8 @@
 //!
 //! `rtt`: one connection, `count` sequential round trips of `size` bytes;
 //! prints latency percentiles. `throughput`: `conns` connections each echoing
-//! `size`-byte messages for `secs` seconds; prints aggregate rate.
+//! `size`-byte writes for `secs` seconds (pipelined: writing and reading the
+//! echo concurrently); prints the aggregate echoed rate.
 //!
 //! See scripts/bench.sh for how to run a like-for-like comparison and what
 //! the numbers do and don't mean.
@@ -59,35 +60,48 @@ fn rtt(addr: SocketAddr, count: usize, size: usize) {
 }
 
 fn throughput(addr: SocketAddr, secs: u64, conns: usize, size: usize) {
+    // Pipelined: per connection one thread writes continuously while another
+    // reads the echo, so this measures bulk transfer, not round trips.
     let stop = Arc::new(AtomicBool::new(false));
     let bytes = Arc::new(AtomicU64::new(0));
-    let workers: Vec<_> = (0..conns)
-        .map(|_| {
-            let (stop, bytes) = (stop.clone(), bytes.clone());
-            std::thread::spawn(move || {
-                let mut s = connect(addr);
-                let msg = vec![0x5a; size];
-                let mut buf = vec![0; size];
-                while !stop.load(Ordering::Relaxed) {
-                    s.write_all(&msg).unwrap();
-                    s.read_exact(&mut buf).unwrap();
-                    bytes.fetch_add(size as u64, Ordering::Relaxed);
+    let mut threads = Vec::new();
+    for _ in 0..conns {
+        let mut writer = connect(addr);
+        let mut reader = writer.try_clone().unwrap();
+        let (stop_w, stop_r, bytes) = (stop.clone(), stop.clone(), bytes.clone());
+        threads.push(std::thread::spawn(move || {
+            let msg = vec![0x5a; size];
+            while !stop_w.load(Ordering::Relaxed) {
+                if writer.write_all(&msg).is_err() {
+                    break;
                 }
-            })
-        })
-        .collect();
+            }
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        }));
+        threads.push(std::thread::spawn(move || {
+            let mut buf = vec![0; 64 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) if !stop_r.load(Ordering::Relaxed) => {
+                        bytes.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                }
+            }
+        }));
+    }
     let start = Instant::now();
     std::thread::sleep(Duration::from_secs(secs));
     stop.store(true, Ordering::Relaxed);
     let elapsed = start.elapsed().as_secs_f64();
-    for w in workers {
-        w.join().unwrap();
-    }
     let total = bytes.load(Ordering::Relaxed) as f64;
+    for t in threads {
+        t.join().unwrap();
+    }
     println!(
-        "throughput {addr} conns={conns} size={size}B: {:.1} MB/s echoed, {:.0} msgs/s",
-        total / elapsed / 1e6,
-        total / size as f64 / elapsed
+        "throughput {addr} conns={conns} write_size={size}B: {:.1} MB/s echoed",
+        total / elapsed / 1e6
     );
 }
 

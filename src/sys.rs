@@ -67,6 +67,7 @@ pub(crate) mod ffi {
         ) -> i64;
         fn sock_sendto_v4(fd: i32, buf: &[u8], ip: u32, port: u16) -> i64;
         fn sock_shutdown(fd: i32, how: i32) -> i32;
+        fn sock_unsent(fd: i32) -> i32;
         fn sock_close(fd: i32) -> i32;
 
         fn kq_create() -> i32;

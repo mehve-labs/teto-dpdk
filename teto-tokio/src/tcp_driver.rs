@@ -24,8 +24,13 @@ pub(crate) type AcceptItem = io::Result<(TetoTcpStream, SocketAddr)>;
 const LISTENER_TOKEN: u64 = 0;
 const READ_CHUNK: usize = 64 * 1024;
 const EVENTS_CAPACITY: usize = 1024;
-/// How long a dropped stream may take to hand its buffered writes to F-Stack.
+/// How long a dropped stream may take to get its data acknowledged by the
+/// peer before it is closed regardless.
 const DROP_GRACE: Duration = Duration::from_secs(30);
+/// How long the loop keeps running after the last socket is gone, so final
+/// FINs/ACKs (and anything F-Stack is batching) actually leave: stopping the
+/// loop tears F-Stack down and discards whatever it still holds.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(1);
 
 struct Entry {
     stream: TcpStream,
@@ -53,6 +58,7 @@ pub(crate) struct TcpDriver {
     events: Events,
     ready: Vec<Event>,
     draining: Vec<(u64, Instant)>,
+    idle_since: Option<Instant>,
 }
 
 impl TcpDriver {
@@ -79,6 +85,7 @@ impl TcpDriver {
             events: Events::with_capacity(EVENTS_CAPACITY),
             ready: Vec::with_capacity(EVENTS_CAPACITY),
             draining: Vec::new(),
+            idle_since: None,
         })
     }
 
@@ -101,6 +108,7 @@ impl TcpDriver {
         // clients are refused instead of queued forever.
         if self.listener.is_some() && self.accept_tx.is_closed() {
             self.listener = None;
+            self.drop_unaccepted();
         }
 
         // Resume accepting once the application has drained the accept queue.
@@ -135,9 +143,32 @@ impl TcpDriver {
         self.ready = ready;
 
         if !self.draining.is_empty() {
-            self.expire_draining();
+            self.check_draining();
         }
-        self.listener.is_some() || !self.conns.is_empty()
+
+        if self.listener.is_some() || !self.conns.is_empty() {
+            self.idle_since = None;
+            return true;
+        }
+        let idle_since = *self.idle_since.get_or_insert_with(Instant::now);
+        idle_since.elapsed() < STOP_GRACE
+    }
+
+    /// With the listener gone nobody can accept these any more (normally
+    /// they were dropped with the channel; this catches one pushed into it
+    /// just as the receiver was dropped).
+    fn drop_unaccepted(&mut self) {
+        let ids: Vec<u64> = self.conns.keys().copied().collect();
+        for id in ids {
+            let Some(entry) = self.conns.get(&id) else { continue };
+            let mut st = entry.conn.lock();
+            if !st.accepted && !st.dropped {
+                st.dropped = true;
+                st.notified = false;
+                drop(st);
+                self.service(id);
+            }
+        }
     }
 
     fn accept_ready(&mut self) {
@@ -265,15 +296,23 @@ impl TcpDriver {
         }
     }
 
-    fn expire_draining(&mut self) {
+    /// Close dropped streams once the peer has acknowledged everything (or
+    /// the grace period is over).
+    fn check_draining(&mut self) {
         let now = Instant::now();
-        let expired: Vec<u64> = self
-            .draining
-            .iter()
-            .filter(|(_, since)| now.duration_since(*since) >= DROP_GRACE)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in expired {
+        let mut done = Vec::new();
+        for &(id, since) in &self.draining {
+            let Some(entry) = self.conns.get(&id) else {
+                done.push(id);
+                continue;
+            };
+            let st = entry.conn.lock();
+            let delivered = st.tx.is_empty() && st.wr_shutdown == WriteShutdown::Done && fully_acked(entry);
+            if delivered || now.duration_since(since) >= DROP_GRACE {
+                done.push(id);
+            }
+        }
+        for id in done {
             self.close(id, None);
         }
     }
@@ -323,19 +362,7 @@ fn sync_interest(kq: &Kqueue, entry: &mut Entry, st: &ConnState) -> Outcome {
 
 fn read_ready(kq: &Kqueue, entry: &mut Entry, st: &mut ConnState, wakes: &mut Wakes) -> Outcome {
     if st.dropped {
-        let mut scratch = [0u8; 4096];
-        loop {
-            match entry.stream.read(&mut scratch) {
-                Ok(0) => {
-                    st.rx_eof = true;
-                    break;
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => return Outcome::Close(None),
-            }
-        }
-        if st.tx.is_empty() {
+        if discard_input(entry, st).is_err() {
             return Outcome::Close(None);
         }
         return sync_interest(kq, entry, st);
@@ -402,7 +429,7 @@ fn flush(kq: &Kqueue, entry: &mut Entry, st: &mut ConnState, wakes: &mut Wakes) 
 
     if st.tx.is_empty() {
         if st.dropped {
-            return Outcome::Close(None);
+            return finish_dropped(kq, entry, st);
         }
         if st.wr_shutdown == WriteShutdown::Requested {
             match entry.stream.shutdown(Shutdown::Write) {
@@ -416,6 +443,42 @@ fn flush(kq: &Kqueue, entry: &mut Entry, st: &mut ConnState, wakes: &mut Wakes) 
             st.wr_shutdown = WriteShutdown::Done;
             wakes.write(st);
         }
+    }
+    sync_interest(kq, entry, st)
+}
+
+/// Read and throw away whatever the peer sent, so the eventual close sends
+/// FIN rather than RST. `Err` means the connection is gone.
+fn discard_input(entry: &Entry, st: &mut ConnState) -> Result<(), ()> {
+    let mut scratch = [0u8; 4096];
+    while !st.rx_eof {
+        match entry.stream.read(&mut scratch) {
+            Ok(0) => st.rx_eof = true,
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(())
+}
+
+fn fully_acked(entry: &Entry) -> bool {
+    // An error means the connection is already gone: nothing left to wait for.
+    entry.stream.unsent_bytes().map_or(true, |n| n == 0)
+}
+
+/// A dropped stream whose queued bytes are all with F-Stack: send FIN, and
+/// close once the peer has acknowledged everything. Until then it stays in
+/// `draining`, which `check_draining` re-examines every tick.
+fn finish_dropped(kq: &Kqueue, entry: &mut Entry, st: &mut ConnState) -> Outcome {
+    if st.wr_shutdown != WriteShutdown::Done {
+        if entry.stream.shutdown(Shutdown::Write).is_err() {
+            return Outcome::Close(None);
+        }
+        st.wr_shutdown = WriteShutdown::Done;
+    }
+    if discard_input(entry, st).is_err() || fully_acked(entry) {
+        return Outcome::Close(None);
     }
     sync_interest(kq, entry, st)
 }

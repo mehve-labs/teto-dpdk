@@ -26,8 +26,9 @@ use crate::conn::{Conn, ConnState, WriteShutdown, RX_LOW, TX_LIMIT};
 /// - `shutdown` flushes and then shuts down the write side (TCP FIN).
 /// - Connection failures (e.g. reset by peer) are returned as errors from
 ///   reads and writes.
-/// - Dropping the stream closes the connection after buffered writes have been
-///   handed to F-Stack (bounded by a 30 s grace period).
+/// - Dropping the stream closes the connection gracefully: buffered writes
+///   are sent, then FIN, and the socket is closed once the peer has
+///   acknowledged everything (or after a 30 s grace period).
 pub struct TetoTcpStream {
     conn: Arc<Conn>,
     peer_addr: SocketAddr,

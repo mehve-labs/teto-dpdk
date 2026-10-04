@@ -10,6 +10,7 @@ use teto_dpdk::net::UdpSocket;
 use teto_dpdk::{FStack, FStackConfig};
 
 use crate::conn::lock;
+use crate::tcp_driver::STOP_GRACE;
 use crate::require_v4;
 
 /// Datagrams buffered in each direction between tokio and the F-Stack thread.
@@ -99,6 +100,7 @@ impl TetoUdpSocket {
                     pending: None,
                     rx_buf: BytesMut::new(),
                     shared: driver_shared,
+                    idle_since: None,
                 };
                 // Runs until the `TetoUdpSocket` is dropped.
                 let _ = fs.run(|| {
@@ -171,6 +173,7 @@ struct UdpDriver {
     pending: Option<(Bytes, SocketAddrV4)>,
     rx_buf: BytesMut,
     shared: Arc<Shared>,
+    idle_since: Option<std::time::Instant>,
 }
 
 impl UdpDriver {
@@ -179,7 +182,14 @@ impl UdpDriver {
     fn tick(&mut self) -> bool {
         let sends_open = self.send_batch();
         self.recv_batch();
-        sends_open || self.pending.is_some() || !self.rx_tx.is_closed()
+        if sends_open || self.pending.is_some() || !self.rx_tx.is_closed() {
+            self.idle_since = None;
+            return true;
+        }
+        // Keep running a little so the last datagrams (batched by F-Stack or
+        // waiting on ARP) leave before F-Stack is torn down.
+        let idle_since = *self.idle_since.get_or_insert_with(std::time::Instant::now);
+        idle_since.elapsed() < STOP_GRACE
     }
 
     /// Returns `false` once the send queue is closed and empty.

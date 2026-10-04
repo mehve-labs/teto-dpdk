@@ -9,7 +9,7 @@
 
 ## Overview
 
-teto-dpdk eliminates syscall overhead and kernel-to-userspace copies by running a full FreeBSD TCP/IP stack in userspace on top of DPDK's poll-mode driver. It is suitable for latency-sensitive or high-throughput network workloads where kernel socket overhead is a bottleneck.
+teto-dpdk runs a full FreeBSD TCP/IP stack in userspace on top of DPDK's poll-mode driver, so packet processing involves no syscalls, interrupts or kernel network stack. It is aimed at latency-sensitive or high-throughput network workloads where the kernel socket path is a bottleneck.
 
 Two crates are provided:
 

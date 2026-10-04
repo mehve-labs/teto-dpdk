@@ -371,12 +371,36 @@ async fn reset_after_peer_half_close(listener: &mut TetoTcpListener) {
 
 /// Dropping the listener closes the listening socket: new clients are
 /// refused instead of left waiting in the backlog, and existing streams keep
-/// working.
+/// working. Once the last stream is dropped, its data still arrives in full
+/// (with FIN), and only then does the F-Stack thread exit.
 async fn dropped_listener_refuses(mut listener: TetoTcpListener) {
+    const LEN: usize = 4 * 1024 * 1024;
     let (mut kept, kept_client) = pair(&mut listener).await;
     drop(listener);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let refused = blocking(|| StdTcpStream::connect_timeout(&addr(), Duration::from_secs(5))).await;
     assert_eq!(refused.unwrap_err().kind(), ErrorKind::ConnectionRefused);
-    echo_check(&mut kept, kept_client, b"still served").await;
+    let mut kept_client = echo_check(&mut kept, kept_client, b"still served").await;
+
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut v = Vec::new();
+        kept_client.read_to_end(&mut v).expect("data and FIN of the last stream");
+        v
+    });
+    timeout(T, kept.write_all(&pattern(LEN))).await.unwrap().unwrap();
+    drop(kept); // last socket, with data still queued: the runtime may now shut down
+    let got = reader.await.unwrap();
+    assert_eq!(got.len(), LEN);
+    assert!(got == pattern(LEN), "data corrupted");
+
+    wait_for_fstack_exit().await;
+}
+
+/// F-Stack's teardown (`rte_eal_cleanup`) removes the TAP device.
+async fn wait_for_fstack_exit() {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while std::path::Path::new("/sys/class/net/dtap0").exists() {
+        assert!(Instant::now() < deadline, "F-Stack thread didn't exit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

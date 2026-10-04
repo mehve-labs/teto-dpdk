@@ -34,6 +34,7 @@ int64_t sock_write(int32_t fd, rust::Slice<const uint8_t> buf);
 int64_t sock_recvfrom_v4(int32_t fd, uint8_t* buf, size_t len, uint32_t& ip, uint16_t& port);
 int64_t sock_sendto_v4(int32_t fd, rust::Slice<const uint8_t> buf, uint32_t ip, uint16_t port);
 int32_t sock_shutdown(int32_t fd, int32_t how);
+int32_t sock_unsent(int32_t fd);
 int32_t sock_close(int32_t fd);
 
 // kqueue. `kq_poll` never blocks.

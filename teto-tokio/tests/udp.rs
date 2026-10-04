@@ -32,7 +32,7 @@ fn udp_suite() {
 
         // Echo server.
         let echo = server.clone();
-        tokio::spawn(async move {
+        let echo_task = tokio::spawn(async move {
             let mut buf = vec![0u8; 65535];
             loop {
                 let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
@@ -101,5 +101,38 @@ fn udp_suite() {
         .await
         .unwrap();
 
+        // Datagrams queued right before the socket is dropped still go out,
+        // and the F-Stack thread exits afterwards.
+        echo_task.abort();
+        let _ = echo_task.await;
+        let client = StdUdpSocket::bind("0.0.0.0:0").unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let client_addr: SocketAddr = format!("10.0.0.2:{}", client.local_addr().unwrap().port()).parse().unwrap();
+        const LAST: usize = 20;
+        for i in 0..LAST {
+            server.send_to(format!("last-{i}").as_bytes(), client_addr).await.unwrap();
+        }
+        drop(Arc::try_unwrap(server).ok().expect("socket still shared"));
+        let got = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 64];
+            let mut n = 0;
+            while n < LAST {
+                match client.recv_from(&mut buf) {
+                    Ok(_) => n += 1,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            n
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, LAST, "datagrams lost when the socket was dropped");
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while std::path::Path::new("/sys/class/net/dtap0").exists() {
+            assert!(Instant::now() < deadline, "F-Stack thread didn't exit");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     });
 }

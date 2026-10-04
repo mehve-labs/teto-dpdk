@@ -193,6 +193,13 @@ impl TcpStream {
         cvt32(ffi::sock_shutdown(self.fd.get()?, how)).map(drop)
     }
 
+    /// Bytes written but not yet acknowledged by the peer (FreeBSD
+    /// `FIONWRITE`). Zero after a write shutdown means everything, up to
+    /// the FIN, has been delivered.
+    pub fn unsent_bytes(&self) -> io::Result<usize> {
+        Ok(cvt32(ffi::sock_unsent(self.fd.get()?))? as usize)
+    }
+
     pub fn peer_addr(&self) -> SocketAddrV4 {
         self.peer
     }
