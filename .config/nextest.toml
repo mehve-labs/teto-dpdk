@@ -1,0 +1,6 @@
+# Integration tests start F-Stack, which can run once per process: nextest
+# runs every test in its own process. They share the veth pair (and port
+# numbers), so they run one at a time.
+[profile.default]
+test-threads = 1
+slow-timeout = { period = "60s", terminate-after = 5 }

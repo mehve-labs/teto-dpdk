@@ -4,17 +4,13 @@
 use std::io::ErrorKind;
 use std::panic::{self, AssertUnwindSafe};
 
+mod common;
+
 use teto_dpdk::net::UdpSocket;
-use teto_dpdk::{FStack, FStackConfig};
 
 #[test]
 fn panic_in_tick_propagates() {
-    let cfg = FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/config.ini"))
-        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
-        .with_eal_arg("--no-pci")
-        .with_eal_arg("--iova-mode=va")
-        .capture_init_output(true);
-    let fs = FStack::init(&cfg).expect("init");
+    let fs = common::init();
     // F-Stack's interface setup chatter was captured rather than printed.
     assert!(fs.init_output().contains("Ethernet address"), "{}", fs.init_output());
     let socket = UdpSocket::bind(&fs, "0.0.0.0:9000".parse().unwrap()).unwrap();

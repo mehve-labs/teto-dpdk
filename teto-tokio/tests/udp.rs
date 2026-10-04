@@ -1,158 +1,132 @@
-//! UDP integration tests against a live F-Stack instance (see tests/tcp.rs
-//! for the environment this needs).
+//! UDP behaviour against a live F-Stack (see tests/common for the setup).
+
+mod common;
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use teto_dpdk::FStackConfig;
-use teto_tokio::{TetoRuntime, TetoUdpSocket};
+use common::*;
+use teto_tokio::TetoUdpSocket;
+use tokio::time::timeout;
 
-fn config() -> FStackConfig {
-    FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
-        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
-        .with_eal_arg("--no-pci")
-        .with_eal_arg("--iova-mode=va")
+const PORT: u16 = 9000;
+
+/// Kernel-side UDP client; waits until F-Stack echoes a first datagram.
+fn udp_client(server: SocketAddr) -> StdUdpSocket {
+    let c = StdUdpSocket::bind("0.0.0.0:0").unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut buf = [0u8; 16];
+    for _ in 0..50 {
+        c.send_to(b"ping", server).unwrap();
+        if c.recv_from(&mut buf).is_ok() {
+            while c.recv_from(&mut buf).is_ok() {} // late duplicates
+            return c;
+        }
+    }
+    panic!("no echo from {server}");
 }
 
-const ADDR: &str = "10.0.0.1:8080";
+/// Spawn an echo loop on `socket`.
+fn echo(socket: Arc<TetoUdpSocket>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
+            socket.send_to(&buf[..n], peer).await.unwrap();
+        }
+    })
+}
 
-#[test]
-fn udp_suite() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async {
-        let rt = TetoRuntime::start(config()).await.expect("start");
-        let v6 = TetoUdpSocket::bind(&rt, "[::1]:8080".parse().unwrap()).await;
-        assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
+#[tokio::test(flavor = "multi_thread")]
+async fn ipv6_is_rejected() {
+    let rt = start().await;
+    let err = TetoUdpSocket::bind(&rt, sa("[::1]:9000")).await.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    let socket = TetoUdpSocket::bind(&rt, fstack(PORT)).await.expect("bind");
+    let err = socket.send_to(b"x", sa("[::1]:9")).await.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+}
 
-        let server = Arc::new(TetoUdpSocket::bind(&rt, ADDR.parse().unwrap()).await.expect("bind"));
-        drop(rt);
-        let v6 = server.send_to(b"x", "[::1]:9".parse().unwrap()).await;
-        assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
+/// A burst is drained in batches, not one datagram per poll iteration.
+#[tokio::test(flavor = "multi_thread")]
+async fn bursts_are_echoed() {
+    let rt = start().await;
+    let socket = Arc::new(TetoUdpSocket::bind(&rt, fstack(PORT)).await.expect("bind"));
+    let _echo = echo(socket);
 
-        // Echo server.
-        let echo = server.clone();
-        let echo_task = tokio::spawn(async move {
-            let mut buf = vec![0u8; 65535];
-            loop {
-                let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
-                echo.send_to(&buf[..n], peer).await.unwrap();
-            }
-        });
-
-        tokio::task::spawn_blocking(|| {
-            let client = StdUdpSocket::bind("0.0.0.0:0").unwrap();
-            client.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-            let server: SocketAddr = ADDR.parse().unwrap();
-
-            // Wait for the TAP device to be configured.
-            let deadline = Instant::now() + Duration::from_secs(90);
+    let seen = blocking(|| {
+        const N: usize = 500;
+        let client = udp_client(fstack(PORT));
+        // Read echoes on another thread while sending, so the client's own
+        // receive buffer doesn't overflow.
+        let reader = client.try_clone().unwrap();
+        let collector = std::thread::spawn(move || {
+            reader.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut buf = [0u8; 65535];
-            loop {
-                // Fails with ENETUNREACH until the TAP device is configured.
-                // (recv errors, including EINTR from DPDK's TAP signal, just retry.)
-                if client.send_to(b"ping", server).is_err() {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-                if let Ok((n, _)) = client.recv_from(&mut buf) {
-                    assert_eq!(&buf[..n], b"ping");
-                    break;
-                }
-                assert!(Instant::now() < deadline, "F-Stack never became reachable");
+            let mut seen = HashSet::new();
+            while seen.len() < N {
+                let Ok((n, _)) = reader.recv_from(&mut buf) else { break };
+                let s = std::str::from_utf8(&buf[..n]).unwrap();
+                let i: usize = s[6..10].parse().unwrap();
+                assert_eq!(s, format!("dgram-{i:04}-{}", "x".repeat(i % 900)));
+                seen.insert(i);
             }
-            while client.recv_from(&mut buf).is_ok() {}
-
-            // P3: a burst is drained in batches, not one datagram per tick.
-            // Echoes are read on another thread while sending, so the
-            // client's own receive buffer doesn't overflow.
-            const N: usize = 500;
-            let reader = client.try_clone().unwrap();
-            let collector = std::thread::spawn(move || {
-                reader.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                let mut buf = [0u8; 65535];
-                let mut seen = HashSet::new();
-                while seen.len() < N {
-                    match reader.recv_from(&mut buf) {
-                        Ok((n, _)) => {
-                            let s = std::str::from_utf8(&buf[..n]).unwrap();
-                            if !s.starts_with("dgram-") {
-                                continue; // late echo of a warm-up ping
-                            }
-                            let i: usize = s[6..10].parse().unwrap();
-                            assert_eq!(s, format!("dgram-{i:04}-{}", "x".repeat(i % 900)));
-                            seen.insert(i);
-                        }
-                        // DPDK's TAP driver signals the process on every packet,
-                        // and sockets with a read timeout aren't restarted.
-                        Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                        Err(_) => break,
-                    }
-                }
-                seen
-            });
-            // Bursts of 100 (~45 KB): each arrives faster than one poll
-            // iteration, so the driver must drain many per tick. A single
-            // 500-datagram burst (~225 KB) can overflow F-Stack's default UDP
-            // receive buffer (~42 KB) whenever the emulated F-Stack thread
-            // stalls, which is legitimate UDP loss, not a driver bug.
-            for i in 0..N {
-                let msg = format!("dgram-{i:04}-{}", "x".repeat(i % 900));
-                client.send_to(msg.as_bytes(), server).unwrap();
-                if i % 100 == 99 {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+            seen.len()
+        });
+        // Bursts of 100 (~45 KB) arrive faster than one poll iteration, so
+        // the driver drains many per tick. (One 225 KB burst could overflow
+        // F-Stack's default ~42 KB UDP receive buffer when the emulated
+        // F-Stack thread stalls: legitimate UDP loss, not a driver bug.)
+        for i in 0..N {
+            client.send_to(format!("dgram-{i:04}-{}", "x".repeat(i % 900)).as_bytes(), fstack(PORT)).unwrap();
+            if i % 100 == 99 {
+                std::thread::sleep(Duration::from_millis(20));
             }
-            let seen = collector.join().unwrap();
-            // UDP over TAP should be lossless at this rate; allow a little slack.
-            assert!(seen.len() >= N * 95 / 100, "only {} of {N} echoes received", seen.len());
-        })
-        .await
-        .unwrap();
-
-        // Datagrams queued right before the socket is dropped still go out,
-        // and the F-Stack thread exits afterwards.
-        echo_task.abort();
-        let _ = echo_task.await;
-        let client = StdUdpSocket::bind("0.0.0.0:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let client_addr: SocketAddr = format!("10.0.0.2:{}", client.local_addr().unwrap().port()).parse().unwrap();
-        const LAST: usize = 20;
-        for i in 0..LAST {
-            server.send_to(format!("last-{i}").as_bytes(), client_addr).await.unwrap();
         }
-        drop(Arc::try_unwrap(server).expect("socket still shared"));
-        let got = tokio::task::spawn_blocking(move || {
-            let mut buf = [0u8; 64];
-            let mut n = 0;
-            while n < LAST {
-                match client.recv_from(&mut buf) {
-                    Ok(_) => n += 1,
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-            n
-        })
-        .await
-        .unwrap();
-        assert_eq!(got, LAST, "datagrams lost when the socket was dropped");
-
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while fstack_thread_running() {
-            assert!(Instant::now() < deadline, "F-Stack thread didn't exit");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
+        let seen = collector.join().unwrap();
+        assert!(seen >= N * 95 / 100, "only {seen} of {N} echoes received");
+        seen
+    })
+    .await;
+    eprintln!("{seen} of 500 echoes");
 }
 
-/// Whether this process still has F-Stack's thread (`TetoRuntime` names it
-/// "fstack"). It exits after teardown, which is how these tests observe that
-/// the runtime stopped.
-fn fstack_thread_running() -> bool {
-    std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
-        .any(|comm| comm.trim() == "fstack")
+/// Datagrams queued right before the socket is dropped still go out, and the
+/// F-Stack thread exits afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_datagrams_sent_after_drop() {
+    const N: usize = 20;
+    let rt = start().await;
+    let socket = TetoUdpSocket::bind(&rt, fstack(PORT)).await.expect("bind");
+    drop(rt);
+    let client = StdUdpSocket::bind("0.0.0.0:0").unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let client_addr = SocketAddr::from(([10, 0, 0, 2], client.local_addr().unwrap().port()));
+    // One exchange first, so F-Stack has resolved the client's MAC: datagrams
+    // sent before ARP completes wait in FreeBSD's ARP hold queue, which keeps
+    // only 16 (net.link.arp.maxhold) -- that's FreeBSD, not what this tests.
+    client.send_to(b"hello", fstack(PORT)).unwrap();
+    let mut buf = [0u8; 16];
+    let (_, from) = timeout(T, socket.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(from, client_addr);
+    socket.send_to(b"hi", client_addr).await.unwrap();
+    let client = blocking(move || {
+        client.recv_from(&mut [0u8; 16]).expect("reply");
+        client
+    })
+    .await;
+    for i in 0..N {
+        socket.send_to(format!("last-{i}").as_bytes(), client_addr).await.unwrap();
+    }
+    drop(socket);
+    let got = blocking(move || {
+        let mut buf = [0u8; 64];
+        (0..N).take_while(|_| client.recv_from(&mut buf).is_ok()).count()
+    })
+    .await;
+    assert_eq!(got, N, "datagrams lost when the socket was dropped");
+    wait_for_fstack_exit().await;
 }

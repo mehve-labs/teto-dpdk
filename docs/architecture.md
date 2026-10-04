@@ -193,6 +193,10 @@ targets, and downstream applications would fail to link; CI builds
   The low-level API avoids the hop; an async executor running on the F-Stack
   thread would avoid it while keeping async/await.
 - **IPv4 only.** IPv6 addresses are rejected explicitly.
+- **UDP bursts to a peer F-Stack hasn't resolved yet.** While ARP resolves,
+  FreeBSD queues at most 16 packets per destination (`net.link.arp.maxhold`,
+  settable under `[freebsd.sysctl]` in `config.ini`); more are dropped. TCP
+  recovers by retransmitting; UDP doesn't.
 - **x86_64 Linux only.** F-Stack's arm64 support is incomplete, and the build
   script needs GNU binutils.
 - **F-Stack version.** Pinned to v1.25. F-Stack master (as of July 2026) runs no

@@ -18,10 +18,11 @@ echo "::group::build (MSRV $MSRV)"
 CARGO_TARGET_DIR=target/msrv cargo "+$MSRV" build --workspace --all-targets
 echo "::endgroup::"
 
-# Each integration test binary starts its own F-Stack instance on the shared
-# veth pair; cargo runs test binaries one after another.
+# Integration tests start F-Stack, which can run once per process: nextest
+# runs each test in its own process (one at a time; see .config/nextest.toml).
 echo "::group::test"
-cargo test --workspace
+cargo nextest run --workspace
+cargo test --workspace --doc
 echo "::endgroup::"
 
 # A separate crate depending on teto-tokio, as a user's application would.

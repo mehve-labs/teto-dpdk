@@ -7,35 +7,23 @@
 //! - an ingress drop filter on teto0 impairs F-Stack -> kernel packets, which
 //!   is what exercises F-Stack's own retransmission and keepalive timers.
 //!
-//! See tests/tcp.rs for the environment these tests need.
+//! See tests/common for the environment these tests need.
+
+mod common;
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream as StdTcpStream};
+use std::net::Shutdown;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use teto_dpdk::{FStackConfig, TcpSocketOptions};
+use common::*;
+use teto_dpdk::TcpSocketOptions;
 use teto_tokio::{TetoRuntime, TetoTcpListener, TetoTcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 const DEV: &str = "teto0";
-
-fn config() -> FStackConfig {
-    FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../config.ini"))
-        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
-        .with_eal_arg("--no-pci")
-        .with_eal_arg("--iova-mode=va")
-        .capture_init_output(true)
-}
-
-fn addr() -> SocketAddr {
-    "10.0.0.1:8080".parse().unwrap()
-}
-
-fn pattern(len: usize, seed: usize) -> Vec<u8> {
-    (0..len).map(|i| ((i + seed) % 251) as u8).collect()
-}
+const PORT: u16 = 8080;
 
 fn tc(args: &[&str]) {
     let out = Command::new("tc").args(args).output().expect("tc must be installed (iproute2)");
@@ -112,40 +100,13 @@ impl Drop for Faults {
     }
 }
 
-fn connect_kernel() -> StdTcpStream {
-    let deadline = Instant::now() + Duration::from_secs(90);
-    loop {
-        match StdTcpStream::connect_timeout(&addr(), Duration::from_secs(1)) {
-            Ok(s) => return s,
-            Err(e) => {
-                assert!(Instant::now() < deadline, "F-Stack never became reachable: {e}");
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-    }
-}
-
-/// Read until EOF, retrying EINTR (DPDK's TAP driver signals the process).
-fn read_all(s: &mut StdTcpStream) -> Vec<u8> {
-    let mut v = Vec::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        match s.read(&mut buf) {
-            Ok(0) => return v,
-            Ok(n) => v.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => panic!("read after {} bytes: {e}", v.len()),
-        }
-    }
-}
-
 async fn accept(listener: &mut TetoTcpListener) -> TetoTcpStream {
     timeout(Duration::from_secs(60), listener.accept()).await.expect("accept timed out").unwrap().0
 }
 
 /// Kernel client: send `len` bytes, half-close, return everything echoed.
 fn client_echo(len: usize, seed: usize) -> Vec<u8> {
-    let mut s = connect_kernel();
+    let mut s = connect(fstack(PORT));
     let mut reader = s.try_clone().unwrap();
     let echo = std::thread::spawn(move || read_all(&mut reader));
     s.write_all(&pattern(len, seed)).unwrap();
@@ -166,23 +127,24 @@ async fn serve_echo(mut server: TetoTcpStream) {
     server.shutdown().await.expect("server shutdown");
 }
 
-#[test]
-fn fault_suite() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async {
-        let rt = TetoRuntime::start(config()).await.expect("start");
-        let mut listener =
-            TetoTcpListener::bind(&rt, addr(), TcpSocketOptions::default().nodelay(true)).await.expect("bind");
-        // Reachability (the TAP device is configured asynchronously).
-        let warmup = tokio::task::spawn_blocking(connect_kernel);
-        drop(accept(&mut listener).await);
-        drop(warmup.await.unwrap());
+#[tokio::test(flavor = "multi_thread")]
+async fn lossy_link_delivers_everything() {
+    lossy_link(&mut listen(PORT).await).await;
+}
 
-        lossy_link(&mut listener).await;
-        outage_from_fstack(&mut listener).await;
-        outage_to_fstack(&mut listener).await;
-        silent_peer_detected_by_keepalive(&rt).await;
-    });
+#[tokio::test(flavor = "multi_thread")]
+async fn recovers_from_outage_of_fstack_packets() {
+    outage_from_fstack(&mut listen(PORT).await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovers_from_outage_of_kernel_packets() {
+    outage_to_fstack(&mut listen(PORT).await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_peer_is_detected_by_keepalive() {
+    silent_peer_detected_by_keepalive(&start().await).await;
 }
 
 /// Loss, delay and reordering in both directions: every byte still arrives,
@@ -230,7 +192,7 @@ async fn outage_from_fstack(listener: &mut TetoTcpListener) {
     let faults = Faults::new();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = tokio::task::spawn_blocking(move || {
-        let mut s = connect_kernel();
+        let mut s = connect(fstack(PORT));
         s.write_all(b"SEND").unwrap();
         // Receive the first part, then hold off while the outage starts.
         let mut first = vec![0u8; 256 * 1024];
@@ -278,7 +240,7 @@ async fn outage_to_fstack(listener: &mut TetoTcpListener) {
     let faults = Faults::new();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = tokio::task::spawn_blocking(move || {
-        let mut s = connect_kernel();
+        let mut s = connect(fstack(PORT));
         go_rx.recv().unwrap(); // the outage is in place
         s.write_all(&pattern(LEN, 11)).unwrap();
         s.shutdown(Shutdown::Write).unwrap();
@@ -313,8 +275,8 @@ async fn silent_peer_detected_by_keepalive(rt: &TetoRuntime) {
         .keepalive_idle_secs(1)
         .keepalive_interval_secs(1)
         .keepalive_count(3);
-    let mut listener = TetoTcpListener::bind(rt, "10.0.0.1:8081".parse().unwrap(), keepalive).await.expect("bind 8081");
-    let client = tokio::task::spawn_blocking(|| StdTcpStream::connect("10.0.0.1:8081").unwrap());
+    let mut listener = TetoTcpListener::bind(rt, fstack(8081), keepalive).await.expect("bind 8081");
+    let client = tokio::task::spawn_blocking(|| connect(fstack(8081)));
     let (mut server, _) = timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
     let client = client.await.unwrap();
 

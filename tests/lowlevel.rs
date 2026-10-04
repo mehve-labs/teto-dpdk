@@ -1,81 +1,91 @@
-//! Low-level API tests against a live F-Stack instance. Needs the project's
-//! Docker environment (privileged container running `entrypoint.sh`).
+//! Low-level API tests against a live F-Stack (see tests/common).
+
+mod common;
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket};
+use std::net::{Shutdown, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket};
 use std::time::{Duration, Instant};
 
+use common::*;
 use teto_dpdk::event::{Events, Interest, Kqueue};
 use teto_dpdk::net::{TcpListener, TcpStream, UdpSocket};
-use teto_dpdk::{FStack, FStackConfig, TcpSocketOptions};
+use teto_dpdk::{FStack, TcpSocketOptions};
 
-fn config() -> FStackConfig {
-    FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/config.ini"))
-        .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
-        .with_eal_arg("--no-pci")
-        .with_eal_arg("--iova-mode=va")
-}
-
-fn sa(s: &str) -> SocketAddr {
-    s.parse().unwrap()
+fn opts() -> TcpSocketOptions {
+    TcpSocketOptions::default().nodelay(true)
 }
 
 #[test]
-fn lowlevel_suite() {
-    let fs = FStack::init(&config()).expect("init");
+fn init_is_once_per_process() {
+    let _fs = init();
     assert_eq!(FStack::init(&config()).unwrap_err().kind(), ErrorKind::AlreadyExists);
+}
 
-    // Bind validation and errors (C3, C6).
-    let opts = TcpSocketOptions::default().nodelay(true);
-    assert_eq!(
-        TcpListener::bind(&fs, sa("[::1]:8080"), &opts).unwrap_err().kind(),
-        ErrorKind::InvalidInput
-    );
-    let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts).expect("bind");
-    assert_eq!(
-        TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts).unwrap_err().kind(),
-        ErrorKind::AddrInUse
-    );
+#[test]
+fn bind_errors_are_reported() {
+    let fs = init();
+    assert_eq!(TcpListener::bind(&fs, sa("[::1]:8080"), &opts()).unwrap_err().kind(), ErrorKind::InvalidInput);
+    let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).expect("bind");
     assert_eq!(listener.local_addr().unwrap().port(), 8080);
+    assert_eq!(TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).unwrap_err().kind(), ErrorKind::AddrInUse);
     let udp = UdpSocket::bind(&fs, sa("0.0.0.0:9000")).unwrap();
     assert_eq!(udp.send_to(b"x", sa("[::1]:9")).unwrap_err().kind(), ErrorKind::InvalidInput);
+}
 
-    let mut tcp = TcpEcho::new(&fs, &listener);
-    let mut udp_echo = UdpEcho { socket: &udp, buf: [0u8; 2048] };
-    let tcp_done = spawn_tcp_clients();
-    let udp_done = spawn_udp_client();
-
-    let deadline = Instant::now() + Duration::from_secs(180);
+/// Re-entering the poll loop from inside it is refused.
+#[test]
+fn nested_run_is_rejected() {
+    let fs = init();
     let mut nested = None;
     fs.run(|| {
-        // S1: re-entering the loop is refused.
-        if nested.is_none() {
-            nested = Some(fs.run(|| {}));
-        }
-        tcp.tick();
-        udp_echo.tick();
-        let finished = tcp_done.is_finished() && udp_done.is_finished();
-        if finished || Instant::now() > deadline {
-            fs.stop();
-        }
+        nested = Some(fs.run(|| {}));
+        fs.stop();
     })
     .unwrap();
     assert!(nested.unwrap().is_err());
-    tcp_done.join().expect("tcp clients");
-    udp_done.join().expect("udp client");
+}
 
-    // F-Stack has shut down: everything fails cleanly, nothing is closed twice.
+/// After the poll loop returns, F-Stack is torn down: every operation fails
+/// cleanly and nothing is closed twice.
+#[test]
+fn everything_fails_cleanly_after_shutdown() {
+    let fs = init();
+    let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).expect("bind");
+    let udp = UdpSocket::bind(&fs, sa("0.0.0.0:9000")).unwrap();
+    let kq = Kqueue::new(&fs).unwrap();
+    fs.run(|| fs.stop()).unwrap();
     let gone = |e: std::io::Error| assert_eq!(e.kind(), ErrorKind::BrokenPipe, "{e}");
     gone(fs.run(|| {}).unwrap_err());
     gone(listener.accept().unwrap_err());
     gone(udp.recv_from(&mut [0u8; 8]).unwrap_err());
     gone(Kqueue::new(&fs).unwrap_err());
-    gone(TcpListener::bind(&fs, sa("0.0.0.0:8081"), &opts).unwrap_err());
-    gone(tcp.kq.poll(&mut Events::with_capacity(1)).unwrap_err());
-    drop(tcp);
-    drop(listener);
-    drop(udp);
+    gone(TcpListener::bind(&fs, sa("0.0.0.0:8081"), &opts()).unwrap_err());
+    gone(kq.poll(&mut Events::with_capacity(1)).unwrap_err());
+    drop((kq, listener, udp));
+}
+
+/// A kqueue-driven echo server serving concurrent clients, closing
+/// connections while handling events.
+#[test]
+fn tcp_echo_with_kqueue() {
+    let fs = init();
+    let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).expect("bind");
+    let mut tcp = TcpEcho::new(&fs, &listener);
+    let clients = spawn_tcp_clients();
+    run_until_done(&fs, &clients, || tcp.tick());
+    clients.join().expect("tcp clients");
+}
+
+/// Bursts of datagrams are drained in one go.
+#[test]
+fn udp_bursts_are_drained() {
+    let fs = init();
+    let udp = UdpSocket::bind(&fs, sa("0.0.0.0:9000")).unwrap();
+    let mut echo = UdpEcho { socket: &udp, buf: [0u8; 2048] };
+    let client = spawn_udp_client();
+    run_until_done(&fs, &client, || echo.tick());
+    client.join().expect("udp client");
 }
 
 struct Conn {
