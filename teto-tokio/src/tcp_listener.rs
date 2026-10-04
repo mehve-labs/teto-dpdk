@@ -14,7 +14,7 @@ const ACCEPT_QUEUE: usize = 1024;
 
 /// An async TCP listener backed by F-Stack.
 ///
-/// Mirrors the [`tokio::net::TcpListener`] API. [`bind`](Self::bind)
+/// Mirrors the [`tokio::net::TcpListener`](https://docs.rs/tokio/1/tokio/net/struct.TcpListener.html) API. [`bind`](Self::bind)
 /// initialises F-Stack on a dedicated thread and starts listening;
 /// [`accept`](Self::accept) yields [`TetoTcpStream`]s.
 ///

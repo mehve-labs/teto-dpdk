@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Mirrors docs.rs: no F-Stack/DPDK available, build.rs skips native code.
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.99.0 --profile minimal && rustup default 1.99.0
+      - name: cargo doc (DOCS_RS)
+        run: cargo doc --workspace --no-deps
+        env:
+          DOCS_RS: "1"
+          RUSTDOCFLAGS: -D warnings
+
+  # Builds DPDK + F-Stack in the project image and runs the integration suite
+  # against F-Stack on a TAP device.
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (F-Stack, DPDK, Rust)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: teto-dpdk:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Lint, MSRV build, tests
+        run: docker run --rm --privileged -v "$PWD":/app teto-dpdk:ci scripts/ci-test.sh

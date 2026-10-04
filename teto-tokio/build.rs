@@ -12,13 +12,13 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-z,nostart-stop-gc");
 
     let output = std::process::Command::new("pkg-config")
-        .args(&["--static", "--libs", "libdpdk"])
+        .args(["--static", "--libs", "libdpdk"])
         .output()
         .expect("Failed to run pkg-config for libdpdk");
     let libs = String::from_utf8_lossy(&output.stdout);
     for token in libs.split_whitespace() {
-        if token.starts_with("-L") {
-            println!("cargo:rustc-link-search=native={}", &token[2..]);
+        if let Some(dir) = token.strip_prefix("-L") {
+            println!("cargo:rustc-link-search=native={dir}");
         } else {
             println!("cargo:rustc-link-arg={}", token);
         }

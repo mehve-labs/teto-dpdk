@@ -38,13 +38,13 @@ fn main() {
     
     // Manually pass pkg-config static libs to rustc to preserve --whole-archive
     let output = std::process::Command::new("pkg-config")
-        .args(&["--static", "--libs", "libdpdk"])
+        .args(["--static", "--libs", "libdpdk"])
         .output()
         .expect("Failed to run pkg-config");
     let libs = String::from_utf8_lossy(&output.stdout);
     for token in libs.split_whitespace() {
-        if token.starts_with("-L") {
-            println!("cargo:rustc-link-search=native={}", &token[2..]);
+        if let Some(dir) = token.strip_prefix("-L") {
+            println!("cargo:rustc-link-search=native={dir}");
         } else {
             println!("cargo:rustc-link-arg={}", token);
         }

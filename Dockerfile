@@ -28,10 +28,6 @@ RUN apt-get update && apt-get install -y \
     ethtool \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 WORKDIR /opt
 
 # Clone F-Stack and its bundled DPDK (F-Stack carries patches to DPDK, so use
@@ -72,6 +68,16 @@ ENV FF_PATH=/opt/f-stack
 # sources (kern/sys_generic.c); same class as the -Wno-error=stringop-*
 # exemptions F-Stack's Makefile already carries.
 RUN make -j$(nproc) CC="cc -Wno-error=array-bounds"
+
+# Install Rust (after F-Stack so a toolchain bump doesn't rebuild DPDK).
+# RUST_VERSION is what the project is built and tested with; RUST_MSRV is the
+# minimum supported version declared in Cargo.toml, checked in CI.
+ARG RUST_VERSION=1.99.0
+ARG RUST_MSRV=1.97.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} -c clippy && \
+    /root/.cargo/bin/rustup toolchain install ${RUST_MSRV} --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 

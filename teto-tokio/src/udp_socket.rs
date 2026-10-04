@@ -31,7 +31,7 @@ struct Shared {
 
 /// An async UDP socket backed by F-Stack.
 ///
-/// Mirrors the [`tokio::net::UdpSocket`] API. Call [`bind`](Self::bind) to
+/// Mirrors the [`tokio::net::UdpSocket`](https://docs.rs/tokio/1/tokio/net/struct.UdpSocket.html) API. Call [`bind`](Self::bind) to
 /// initialise the F-Stack runtime and bind the socket, then use
 /// [`recv_from`](Self::recv_from) and [`send_to`](Self::send_to).
 ///
