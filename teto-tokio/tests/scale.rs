@@ -30,11 +30,18 @@ struct Sysctls(Vec<(String, String)>);
 impl Sysctls {
     fn set(values: &[(&str, &str)]) -> Self {
         let mut saved = Vec::new();
+        let normalize = |v: &str| v.split_whitespace().collect::<Vec<_>>().join(" ");
         for (key, value) in values {
             let old = std::process::Command::new("sysctl").args(["-n", key]).output().expect("sysctl");
             let old = String::from_utf8_lossy(&old.stdout).trim().to_owned();
+            if normalize(&old) == normalize(value) {
+                continue; // already set, e.g. by `docker run --sysctl` (scripts/test.sh)
+            }
             let out = std::process::Command::new("sysctl").args(["-w", &format!("{key}={value}")]).output();
-            assert!(out.is_ok_and(|o| o.status.success()), "sysctl {key} failed (needs root)");
+            assert!(
+                out.is_ok_and(|o| o.status.success()),
+                "sysctl {key} failed: set it with `docker run --sysctl {key}=...` or run privileged"
+            );
             saved.push((key.to_string(), old));
         }
         Sysctls(saved)

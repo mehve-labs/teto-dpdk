@@ -41,4 +41,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Lint, MSRV build, tests
-        run: docker run --rm --privileged -v "$PWD":/app teto-dpdk:ci scripts/ci-test.sh
+        run: scripts/test.sh
+        env:
+          TETO_IMAGE: teto-dpdk:ci
+          TETO_SKIP_BUILD: "1"

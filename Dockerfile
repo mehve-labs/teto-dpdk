@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y \
     pciutils \
     iproute2 \
     iputils-ping \
-    net-tools \
     netcat \
     sudo \
     tcpdump \
@@ -79,6 +78,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} -c clippy && \
     /root/.cargo/bin/rustup toolchain install ${RUST_MSRV} --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Test runner: F-Stack can start once per process, and nextest runs every
+# test in its own process.
+ARG NEXTEST_VERSION=0.9.146
+RUN curl -sSfL "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar zxf - -C /root/.cargo/bin
 
 WORKDIR /app
 

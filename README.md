@@ -36,11 +36,11 @@ The Rust layer interfaces with F-Stack through a C++ wrapper (`cxx_layer/`) usin
 
 ## Quick Start
 
-DPDK requires specific kernel modules and hugepage configuration that are complex to set up on a host. The included Docker image handles all of this.
+DPDK and F-Stack are built inside the project's Docker image, so you need only Docker. The container gets its own network namespace with a veth pair standing in for a NIC; nothing on your machine's network changes.
 
 ```bash
-docker build -t teto-dpdk .
-docker run --privileged --network=host -it -v $(pwd):/app teto-dpdk bash
+docker compose up -d                  # first run builds the image (~20 min under emulation)
+docker compose exec teto-dpdk bash
 
 # Inside the container — choose one:
 cargo run --example udp_echo                      # Low-level UDP echo
@@ -221,14 +221,16 @@ teto-dpdk/                          (Cargo workspace root)
 
 ## Testing
 
-The integration tests need F-Stack, so they run in the Docker environment (each test binary starts its own F-Stack instance on the veth pair; cargo runs them one at a time):
+The integration tests need F-Stack, so they run in the Docker image. One command runs everything (clippy, the MSRV build, the integration tests, doctests and a downstream-crate link check) in a container:
 
 ```bash
-docker run --privileged -it -v $(pwd):/app teto-dpdk bash
-cargo test --workspace     # inside the container
+scripts/test.sh                            # everything
+scripts/test.sh -E 'test(half_close)'      # a subset (cargo-nextest filter)
 ```
 
-They cover the failure modes that matter for a network stack: half-close, connection reset, descriptor reuse after close, slow readers and slow consumers (backpressure in both directions), dropping a stream with unsent data, many concurrent connections, UDP bursts, init/bind errors, and panics in the poll loop.
+F-Stack can start only once per process, so the tests run under [cargo-nextest](https://nexte.st), which gives every test its own process. Plain `cargo test` stops with a message saying so.
+
+They cover the failure modes that matter for a network stack: half-close, connection reset, descriptor reuse after close, slow readers and slow consumers (backpressure in both directions), dropping a stream with unsent data, many concurrent connections, UDP bursts, init/bind errors, and panics in the poll loop. Fault-injection tests impair the link with `tc` (loss, reordering, outages, silent peers), and a churn test checks memory stays flat.
 
 ## Performance
 
@@ -249,7 +251,7 @@ The tokio adapter copies each payload twice in each direction (between F-Stack a
 
 ## Requirements
 
-- **Docker testing**: Docker with `--privileged` support, Linux or WSL2
+- **Docker testing**: Docker (Linux, macOS or WSL2); the container needs the `NET_ADMIN` capability
 - **Bare metal / AWS**: hugepages, IOMMU/VT-d enabled, NIC bound via `vfio-pci` — see [docs/bare-metal-setup.md](docs/bare-metal-setup.md)
 
 ## License

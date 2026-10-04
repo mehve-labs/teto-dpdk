@@ -205,10 +205,13 @@ targets, and downstream applications would fail to link; CI builds
 
 ## Testing
 
-Everything except docs builds needs F-Stack, so tests run in the Docker image
-(privileged; `entrypoint.sh` creates the veth pair `teto0` ⇄ `teto0-dpdk`
-that F-Stack attaches to with DPDK's `af_packet` driver). Each test binary starts its own F-Stack instance; cargo runs them one
-after another. `scripts/ci-test.sh` is what CI runs:
+Everything except docs builds needs F-Stack, so tests run in the Docker image.
+`entrypoint.sh` creates the veth pair `teto0` ⇄ `teto0-dpdk` that F-Stack
+attaches to with DPDK's `af_packet` driver; the container needs only
+`NET_ADMIN`. F-Stack can start once per process, so the tests run under
+cargo-nextest, which gives each test its own process (one at a time: they
+share the veth pair). `scripts/test.sh` runs everything in a container; it
+is also what CI runs:
 
 - **Behaviour:** `teto-tokio/tests/{tcp,udp,runtime}.rs` and
   `tests/lowlevel.rs`: half-close, resets, descriptor reuse, backpressure in
