@@ -1,6 +1,8 @@
 # Bare Metal and AWS Setup
 
-This guide covers running teto-dpdk on a physical machine or an AWS instance with SR-IOV. Unlike the Docker TAP setup, here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (on SR-IOV) the hypervisor data path.
+This guide covers running teto-dpdk on a physical machine or a cloud VM with an SR-IOV NIC. Unlike the Docker TAP setup, here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (with SR-IOV) the hypervisor data path.
+
+> **Status:** the project's tests run in Docker over a TAP device. This guide follows the standard DPDK and F-Stack setup but hasn't been validated end to end on real hardware with the current release. Please report anything that doesn't work. teto builds for x86_64 Linux only.
 
 ---
 
@@ -52,7 +54,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 
 ## 1. Configure hugepages
 
-Hugepages are required on bare metal. The `--no-huge` workaround used in Docker trades performance for convenience -- remove it here.
+Use hugepages on bare metal. The Docker setup runs without them (`no_huge=1` in `config.ini`), which trades performance for convenience.
 
 ```bash
 # Allocate 512 × 2MB hugepages = 1 GB
@@ -163,32 +165,39 @@ Then set `lcore_mask=2` in config.ini (`2` in hex = bit 1 = core 1).
 
 ## 5. Update config.ini
 
-Remove the Docker-specific workarounds and point DPDK at the real NIC.
+Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings:
+
+- `no_huge=1` and `memory=512`: use the hugepages from step 1;
+- `tx_csum_offoad_skip=1` (sic, F-Stack's spelling): let the NIC offload checksums;
+- `net.inet.udp.checksum=0` under `[freebsd.sysctl]`: real NICs deliver correct UDP checksums.
+
+Then point DPDK at the NIC. Comments must be on their own lines: F-Stack's INI parser doesn't strip `#` comments that follow a value.
 
 ```ini
 [dpdk]
 lcore_mask=2
 promiscuous=1
-# no_huge and memory are NOT needed -- use real hugepages
-# allow tells DPDK to use this specific NIC; omit the TAP vdev
+# Send immediately (latency); raise toward 100 to batch for bulk throughput.
+pkt_tx_delay=0
+# The NIC DPDK should use (PCI address from step 3).
 allow=0000:00:1f.6
 port_list=0
 
 [port0]
-addr=192.168.1.10        # IP you want F-Stack to own on this NIC
+# The IP F-Stack owns on this NIC.
+addr=192.168.1.10
 netmask=255.255.255.0
 broadcast=192.168.1.255
-gateway=192.168.1.1      # Your actual router
-lcore_list=1             # Core that handles this port (must match lcore_mask)
+# Your actual router.
+gateway=192.168.1.1
+# The lcore that handles this port (must be in lcore_mask).
+lcore_list=1
 
 [freebsd.boot]
 hz=100
 
 [freebsd.sysctl]
-# Leave net.inet.udp.checksum at default (1) -- real NICs compute correct checksums
 ```
-
-Keep `pkt_tx_delay=0` in `[dpdk]` (the repository's default) for latency, or raise it toward 100 for bulk throughput. See [config-reference.md](config-reference.md#dpdk).
 
 See [config-reference.md](config-reference.md) for all available keys.
 
@@ -211,6 +220,22 @@ let rt = TetoRuntime::start(cfg).await?;
 The examples pick the profile from the environment (`FStackConfig::from_env()`): `TETO_PROFILE=bare-metal` selects the bare-metal profile, and `TETO_CONFIG` names the config file (default: `config.ini` in the working directory).
 
 Don't run `entrypoint.sh` on bare metal: there's no TAP device to configure.
+
+### In a container
+
+The bare-metal setup also works inside a container, without the Docker/TAP workarounds. The host does steps 1–4 (hugepages, IOMMU, binding the NIC to `vfio-pci`). The container needs the VFIO devices, the hugepage mount, and permission to lock memory:
+
+```bash
+docker run --rm -it \
+    --device /dev/vfio/vfio --device /dev/vfio/<group> \
+    -v /dev/hugepages:/dev/hugepages \
+    --cap-add IPC_LOCK --cap-add SYS_RAWIO --ulimit memlock=-1 \
+    -e TETO_PROFILE=bare-metal -e TETO_CONFIG=/etc/teto/config.ini \
+    -v /etc/teto:/etc/teto:ro \
+    your-image ./tcp_echo_async
+```
+
+(`<group>` is the IOMMU group of the NIC: `readlink /sys/bus/pci/devices/<PCI addr>/iommu_group`.) This hasn't been validated by the project yet.
 
 ---
 
@@ -236,21 +261,22 @@ To compare against the kernel stack, run `scripts/bench.sh`'s two-host procedure
 
 ## AWS-specific notes
 
-### Instance types with SR-IOV
+Not validated by this project; these are the standard DPDK-on-EC2 steps.
 
-For meaningful kernel bypass on AWS, use an instance with SR-IOV support. The NIC's Virtual Function (VF) is exposed directly to the instance via PCIe passthrough:
+### Instance types
+
+Nitro instances expose the Elastic Network Adapter (ENA), an SR-IOV virtual function, directly to the instance. teto is x86_64-only, so use Intel/AMD families:
 
 | Family | Notes |
 |--------|-------|
-| `c5n`, `c6gn`, `c7gn` | High-bandwidth, SR-IOV, good for networking workloads |
-| `*.metal` instances | Full bare metal -- no hypervisor at all, best latency |
-| `p3dn`, `p4d` | GPU instances with high-bandwidth networking for ML/HPC |
+| `c5n`, `c6in`, `c7i` / `c7a` | High network bandwidth |
+| `*.metal` | No hypervisor at all; best latency |
 
-Standard ENA instances without SR-IOV still benefit from removing the kernel stack overhead, but the hypervisor remains in the data path.
+Attach a second ENA interface for DPDK and keep the primary one for SSH: binding the only interface to DPDK cuts you off.
 
 ### ENA driver
 
-AWS EC2 uses the ENA NIC. DPDK ships an ENA PMD (`librte_net_ena`). The setup is the same as above -- find the ENA VF's PCI address, bind to `vfio-pci`, set `allow=<PCI addr>` in config.ini.
+DPDK ships an ENA PMD (`librte_net_ena`). Find the ENA interface's PCI address, bind it to `vfio-pci`, and set `allow=<PCI addr>` in config.ini. Most instance types have no IOMMU, so VFIO needs the no-IOMMU mode from step 2. See DPDK's ENA guide for write-combining (LLQ) setup, which affects ENA performance.
 
 ```bash
 # Typical ENA PCI address on EC2

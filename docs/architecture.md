@@ -115,9 +115,11 @@ its buffers and yours), the price of handing data between threads. There are
 no per-message allocations on the TCP path; UDP datagrams are carved out of
 1 MiB blocks.
 
-`flush` completes when `tx` is empty, i.e. F-Stack has accepted the bytes.
-That's like a kernel socket's flush, except that it can wait on a peer that
-stops reading.
+`write` completes once bytes are in `tx`; `flush` completes once `tx` is
+empty, i.e. F-Stack has them in its socket send buffer. That is the point a
+kernel socket's `write` already reaches. (Kernel sockets' `flush` is a
+no-op.) Because of that, `flush` and `shutdown` can wait as long as the peer
+doesn't read.
 
 ### Connection lifecycle
 
@@ -191,6 +193,8 @@ targets, and downstream applications would fail to link; CI builds
   The low-level API avoids the hop; an async executor running on the F-Stack
   thread would avoid it while keeping async/await.
 - **IPv4 only.** IPv6 addresses are rejected explicitly.
+- **x86_64 Linux only.** F-Stack's arm64 support is incomplete, and the build
+  script needs GNU binutils.
 - **F-Stack version.** Pinned to v1.25. F-Stack master (as of July 2026) runs no
   FreeBSD kernel timers, which breaks retransmission.
   `teto-tokio/tests/faults.rs` fails on it, so run that suite when upgrading.
