@@ -60,8 +60,8 @@ The `teto-tokio` crate provides familiar async/await wrappers. A dedicated F-Sta
 
 ```toml
 [dependencies]
-teto-tokio = "0.1"
-teto-dpdk = "0.1"
+teto-tokio = "0.3"
+teto-dpdk = "0.3"
 ```
 
 ```rust
@@ -107,7 +107,7 @@ The low-level API gives you non-blocking F-Stack sockets and a kqueue, and runs 
 
 ```toml
 [dependencies]
-teto-dpdk = "0.1"
+teto-dpdk = "0.3"
 ```
 
 ```rust
@@ -257,3 +257,12 @@ teto-dpdk statically links against [F-Stack](https://github.com/F-Stack/f-stack)
 **Note for downstream:** teto-dpdk is licensed permissively, but building it links against F-Stack/DPDK and related components, some of which are BSD- or GPL-2.0-licensed (see [NOTICE](NOTICE)). If you distribute a **compiled binary** that statically links these, that binary's redistribution terms are governed by those components' licenses — not by teto-dpdk's Apache-2.0 license. Using teto-dpdk as a source dependency imposes no such obligation on you.
 
 Unless you explicitly state otherwise, any contribution you submit for inclusion in teto-dpdk shall be licensed under the Apache License 2.0, without any additional terms or conditions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Licensing history
+
+| Versions | License |
+|---|---|
+| 0.1.0 – 0.1.2 (July 2026) | AGPL-3.0-only (with a separate commercial licence offered) |
+| 0.2.0 and later | Apache-2.0 |
+
+The 0.1.x releases remain on crates.io under their original AGPL-3.0 terms. A licence change applies only to new releases, so if you depend on 0.1.x, those terms still apply to that code. Upgrade to 0.2.0 or later for Apache-2.0.

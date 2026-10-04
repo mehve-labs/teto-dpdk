@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "teto-dpdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "teto-tokio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "teto-dpdk",

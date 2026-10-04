@@ -28,4 +28,6 @@ Licensed under the [Apache License 2.0](LICENSE) — free for everyone, any purp
 
 **Note for downstream:** teto-tokio is licensed permissively, but it builds on `teto-dpdk`, which statically links F-Stack/DPDK and related components, some of which are BSD- or GPL-2.0-licensed (see [NOTICE](NOTICE)). If you distribute a **compiled binary** that statically links these, that binary's redistribution terms are governed by those components' licenses — not by teto-tokio's Apache-2.0 license. Using teto-tokio as a source dependency imposes no such obligation on you.
 
+Versions 0.1.0–0.1.2 were released under AGPL-3.0-only; 0.2.0 and later are Apache-2.0 (see the repository README's licensing history).
+
 Unless you explicitly state otherwise, any contribution you submit for inclusion in teto-tokio shall be licensed under the Apache License 2.0, without any additional terms or conditions. See the repository's [CONTRIBUTING.md](https://github.com/mehve-labs/teto-dpdk/blob/master/CONTRIBUTING.md).
