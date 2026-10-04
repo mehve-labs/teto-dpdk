@@ -88,6 +88,8 @@ pub(crate) struct ConnState {
     /// Written by the stream, not yet accepted by F-Stack.
     pub tx: BytesMut,
     pub wr_shutdown: WriteShutdown,
+    /// The application received the stream from `accept`; reading starts then.
+    pub accepted: bool,
     /// The `TetoTcpStream` was dropped; driver closes after `tx` drains.
     pub dropped: bool,
     pub error: Option<ConnError>,

@@ -32,13 +32,13 @@ The `--privileged` flag is required for DPDK to map memory and create TAP device
 
 Four entry points are available. All use the same Docker image and `config.ini`.
 
-### Low-level UDP echo (raw callbacks)
+### Low-level UDP echo
 
 ```bash
 cargo run --example udp_echo
 ```
 
-### Low-level TCP echo (raw callbacks)
+### Low-level TCP echo
 
 ```bash
 cargo run --example tcp_echo
@@ -59,23 +59,15 @@ cargo run -p teto-tokio --example udp_echo_async
 The first run compiles the Rust + C++ code (~1 minute). On success you will see:
 
 ```
-Initializing F-Stack...
-[EAL] arg[0]: f-stack
-[EAL] arg[1]: --no-huge
+f-stack --no-huge -c1 -m512 --proc-type=auto
 ...
-[DPDK] Available ports: 1
-[DPDK] Port 0 MAC=xx:xx:xx:xx:xx:xx link=UP speed=10000Mbps
+Port 0 Link Up - speed 10000 Mbps - full-duplex
 ...
 f-stack-0: Ethernet address: xx:xx:xx:xx:xx:xx
 f-stack-0: Successed to register dpdk interface
 ```
 
-For TCP you will additionally see:
-
-```
-[TCP] Listening on 0.0.0.0:8080 fd=0
-Starting F-Stack TCP event loop...
-```
+followed by the example's own line, e.g. `Listening on 0.0.0.0:8080` (low-level TCP), `Bound to 0.0.0.0:8080` (low-level UDP) or `Listening — ready for connections.` (async TCP).
 
 Shortly after, the entrypoint's background script detects `dtap0` and prints:
 
@@ -107,11 +99,7 @@ docker exec -it <CONTAINER_ID> bash
 echo "Hello F-Stack!" | nc -u -w1 10.0.0.1 8080
 ```
 
-You should see `Hello F-Stack!` echoed back, and the first terminal prints:
-
-```
-[UDP] Received 15 bytes from 10.0.0.2:XXXXX
-```
+You should see `Hello F-Stack!` echoed back. The async example also prints `[10.0.0.2:XXXXX] echoing 15 bytes`; the low-level one echoes silently.
 
 ### TCP test
 
@@ -131,9 +119,8 @@ nc -w10 10.0.0.1 8080
 The first terminal prints:
 
 ```
-[TCP] New connection fd=1 from 10.0.0.2:XXXXX
-[TCP] Received 11 bytes from 10.0.0.2:XXXXX on fd=1
-[TCP] Connection closed fd=1
+[10.0.0.2:XXXXX] connected
+[10.0.0.2:XXXXX] disconnected      (async example; the low-level one prints "closed")
 ```
 
 ---
@@ -180,28 +167,20 @@ tcpdump -i dtap0 -nn -e udp port 8080
 
 If you see steps 1–3 but not step 4, the MAC addresses are the same (see check 2).
 
-### 5. Are DPDK stats incrementing?
+### 5. Are packets reaching DPDK?
 
-The event loop prints DPDK stats every ~500k iterations. Look for:
-
-```
-[DPDK] ipackets=N opackets=N ierrors=0 imissed=0 rx_nombuf=0
+```bash
+ip -s link show dtap0
 ```
 
-- `ipackets` not incrementing → packets not reaching DPDK from the TAP at all
-- `ipackets` incrementing but no `Received UDP packet` log → F-Stack is receiving frames but dropping at the IP/UDP layer (checksum issue or wrong destination IP)
-- `ipackets` and logs present but no echo → ARP resolution failing (MAC mismatch)
+The kernel's **TX** counters on `dtap0` are frames handed to DPDK; **RX** counters are frames F-Stack sent back.
 
-### 6. Check EAL args at startup
+- TX not incrementing → the kernel isn't routing to `dtap0` (check the address and route from step 3)
+- TX incrementing, RX not → F-Stack receives frames but doesn't answer: wrong destination IP, checksum drop (step 7), or ARP failing because the MACs match (step 2)
 
-```
-[EAL] arg[N]: ...
-```
+### 6. Check the EAL arguments
 
-Verify these are all present:
-- `--no-pci` — prevents DPDK from scanning PCI and stealing port 0
-- `--vdev=net_tap0,iface=dtap0` — creates the TAP device
-- `--no-huge` — required in Docker (comes from `no_huge=1` in config.ini)
+F-Stack prints the arguments it built from `config.ini` (e.g. `f-stack --no-huge -c1 -m512 --proc-type=auto`). The Docker profile (`FStackConfig::for_docker()`) appends `--vdev=net_tap0,iface=dtap0,mac=fixed`, `--no-pci` and `--iova-mode=va`, which aren't echoed. If `dtap0` exists (`ip link show dtap0`) while the example runs, the `--vdev` argument took effect. F-Stack accepts at most 16 EAL arguments in total; more is reported as an initialisation error.
 
 ### 7. Check checksum offload
 

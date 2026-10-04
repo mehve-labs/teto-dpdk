@@ -148,10 +148,10 @@ pub struct TcpSocketOptions {
     /// Send buffer size in bytes. FreeBSD default: ~64 KB.
     pub send_buf: Option<u32>,
 
-    /// Linger timeout in seconds. When set, `ff_close` blocks (up to this
-    /// many seconds) until buffered data is sent, then sends RST if it
-    /// couldn't drain in time. When `None`, close returns immediately and
-    /// the stack drains in the background.
+    /// `SO_LINGER` timeout in seconds. Sockets here are non-blocking, so
+    /// closing never blocks; `Some(0)` makes close send RST and discard
+    /// unsent data (which defeats teto-tokio's flush-on-drop). When `None`,
+    /// the stack sends buffered data in the background after close.
     pub linger_secs: Option<u32>,
 
     /// Not supported: F-Stack has no `TCP_QUICKACK` (it is Linux-only), so

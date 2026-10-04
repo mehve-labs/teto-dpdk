@@ -20,7 +20,9 @@ use crate::conn::{Conn, ConnState, WriteShutdown, RX_LOW, TX_LIMIT};
 /// - Writes are buffered (up to 256 KiB per connection) and handed to F-Stack
 ///   on its next poll iteration. `poll_write` returns `Pending` while the
 ///   buffer is full, so a slow peer slows the writer down. `flush` completes
-///   once F-Stack has accepted everything written.
+///   once F-Stack has accepted everything written, so unlike a kernel socket
+///   it can wait indefinitely on a peer that stops reading (wrap it in a
+///   timeout if that matters).
 /// - `shutdown` flushes and then shuts down the write side (TCP FIN).
 /// - Connection failures (e.g. reset by peer) are returned as errors from
 ///   reads and writes.
@@ -35,6 +37,13 @@ pub struct TetoTcpStream {
 impl TetoTcpStream {
     pub(crate) fn new(conn: Arc<Conn>, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
         Self { conn, peer_addr, local_addr }
+    }
+
+    /// Called when the application takes the stream from the accept queue.
+    pub(crate) fn mark_accepted(&self) {
+        let mut st = self.conn.lock();
+        st.accepted = true;
+        self.conn.notify(&mut st);
     }
 
     pub fn peer_addr(&self) -> SocketAddr {

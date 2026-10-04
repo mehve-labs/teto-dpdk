@@ -66,6 +66,8 @@ impl TetoUdpSocket {
     /// Spawns a dedicated OS thread for the F-Stack poll loop. F-Stack can be
     /// initialised once per process, so this can be called once, and not
     /// together with [`TetoTcpListener::bind`](crate::TetoTcpListener::bind).
+    /// A bind failure can't be retried in the same process. The F-Stack
+    /// thread exits once the socket is dropped.
     pub async fn bind(cfg: FStackConfig, addr: SocketAddr) -> io::Result<Self> {
         require_v4(addr)?;
         let (rx_tx, rx_rx) = mpsc::channel(QUEUE);
@@ -98,7 +100,12 @@ impl TetoUdpSocket {
                     rx_buf: BytesMut::new(),
                     shared: driver_shared,
                 };
-                let _ = fs.run(|| driver.tick());
+                // Runs until the `TetoUdpSocket` is dropped.
+                let _ = fs.run(|| {
+                    if !driver.tick() {
+                        fs.stop();
+                    }
+                });
             })?;
 
         let local_addr = ready_rx.await.map_err(|_| {
@@ -167,31 +174,37 @@ struct UdpDriver {
 }
 
 impl UdpDriver {
-    fn tick(&mut self) {
-        self.send_batch();
+    /// Returns `false` once the `TetoUdpSocket` has been dropped and every
+    /// queued datagram has been sent.
+    fn tick(&mut self) -> bool {
+        let sends_open = self.send_batch();
         self.recv_batch();
+        sends_open || self.pending.is_some() || !self.rx_tx.is_closed()
     }
 
-    fn send_batch(&mut self) {
+    /// Returns `false` once the send queue is closed and empty.
+    fn send_batch(&mut self) -> bool {
         for _ in 0..BATCH {
             let (data, addr) = match self.pending.take() {
                 Some(d) => d,
                 None => match self.tx_rx.try_recv() {
                     Ok(d) => d,
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Empty) => return true,
+                    Err(TryRecvError::Disconnected) => return false,
                 },
             };
             match self.socket.send_to(&data, addr.into()) {
                 Ok(_) => {}
                 Err(e) if is_transient_send_error(&e) => {
                     self.pending = Some((data, addr));
-                    return;
+                    return true;
                 }
                 Err(e) => {
                     lock(&self.shared.send_error).get_or_insert(e);
                 }
             }
         }
+        true
     }
 
     fn recv_batch(&mut self) {
@@ -213,7 +226,12 @@ impl UdpDriver {
                     permit.send(Ok((self.rx_buf.split().freeze(), from.into())));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                Err(e) => permit.send(Err(e)),
+                Err(e) => {
+                    // At most one error per tick, so a persistent error
+                    // can't flood the queue.
+                    permit.send(Err(e));
+                    return;
+                }
             }
         }
     }

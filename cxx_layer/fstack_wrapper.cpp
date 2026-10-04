@@ -221,11 +221,12 @@ int32_t kq_change(int32_t kq, const KEvent& c) {
 }
 
 int32_t kq_poll(int32_t kq, rust::Slice<KEvent> events) {
+    const size_t want = std::min<size_t>(events.size(), 1 << 20);
     thread_local std::vector<struct kevent> buf;
-    if (buf.size() < events.size()) {
-        buf.resize(events.size());
+    if (buf.size() < want) {
+        buf.resize(want);
     }
-    int n = ff_kevent(kq, nullptr, 0, buf.data(), static_cast<int>(events.size()), &ZERO_TIMEOUT);
+    int n = ff_kevent(kq, nullptr, 0, buf.data(), static_cast<int>(want), &ZERO_TIMEOUT);
     if (n < 0) {
         return static_cast<int32_t>(neg_errno());
     }

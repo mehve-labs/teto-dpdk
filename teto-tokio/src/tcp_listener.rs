@@ -57,7 +57,12 @@ impl TetoTcpListener {
     /// Spawns a dedicated OS thread that owns the F-Stack poll loop. F-Stack
     /// can be initialised once per process, so this can be called once, and
     /// not together with [`TetoUdpSocket::bind`](crate::TetoUdpSocket::bind).
-    /// Initialisation and bind failures are returned as errors.
+    /// Initialisation and bind failures are returned as errors. Because
+    /// F-Stack can't be initialised twice, a bind failure (e.g. an address
+    /// not configured in `config.ini`) can't be retried in the same process.
+    ///
+    /// The F-Stack thread exits once the listener and all its streams have
+    /// been dropped; F-Stack can't be restarted afterwards.
     pub async fn bind(
         cfg: FStackConfig,
         addr: SocketAddr,
@@ -82,8 +87,13 @@ impl TetoTcpListener {
                     }
                 };
                 let _ = ready_tx.send(Ok(driver.local_addr()));
-                // Only returns if a tick panics (the panic then resumes here).
-                let _ = fs.run(|| driver.tick());
+                // Runs until the listener and every stream are dropped (or a
+                // tick panics; the panic then resumes here).
+                let _ = fs.run(|| {
+                    if !driver.tick() {
+                        fs.stop();
+                    }
+                });
             })?;
 
         let local_addr = ready_rx.await.map_err(|_| {
@@ -99,7 +109,11 @@ impl TetoTcpListener {
     /// connection) are returned as errors; the listener stays usable.
     pub async fn accept(&mut self) -> io::Result<(TetoTcpStream, SocketAddr)> {
         match self.accept_rx.recv().await {
-            Some(item) => item,
+            Some(Ok((stream, peer))) => {
+                stream.mark_accepted();
+                Ok((stream, peer))
+            }
+            Some(Err(e)) => Err(e),
             None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "F-Stack runtime stopped")),
         }
     }

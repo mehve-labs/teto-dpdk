@@ -30,7 +30,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match stream.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        println!("[{peer}] echoing {n} bytes");
                         if stream.write_all(&buf[..n]).await.is_err() {
                             break;
                         }

@@ -127,6 +127,8 @@ fn tcp_suite() {
         slow_consumer_receive(&mut listener).await;
         drop_flushes_pending_writes(&mut listener).await;
         many_connections(&mut listener).await;
+        reset_after_peer_half_close(&mut listener).await;
+        dropped_listener_refuses(listener).await;
     });
 }
 
@@ -345,4 +347,36 @@ async fn many_connections(listener: &mut TetoTcpListener) {
         timeout(T, t).await.unwrap().unwrap();
     }
     timeout(Duration::from_secs(60), clients).await.unwrap().unwrap();
+}
+
+/// A reset that arrives while the stream is idle (peer already half-closed,
+/// nothing buffered) is reported on the next write. (`shutdown` alone may
+/// still succeed: F-Stack's `shutdown` on a reset socket returns 0.)
+async fn reset_after_peer_half_close(listener: &mut TetoTcpListener) {
+    let (mut server, client) = pair(listener).await;
+    client.shutdown(Shutdown::Write).unwrap();
+    assert_eq!(timeout(T, server.read(&mut [0u8; 8])).await.unwrap().unwrap(), 0);
+    timeout(T, server.write_all(b"unread")).await.unwrap().unwrap();
+    timeout(T, server.flush()).await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(client); // unread data: the kernel sends RST
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let res = async {
+        server.write_all(b"after reset").await?;
+        server.flush().await
+    };
+    let err = timeout(T, res).await.unwrap().unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::ConnectionReset | ErrorKind::BrokenPipe), "{err:?}");
+}
+
+/// Dropping the listener closes the listening socket: new clients are
+/// refused instead of left waiting in the backlog, and existing streams keep
+/// working.
+async fn dropped_listener_refuses(mut listener: TetoTcpListener) {
+    let (mut kept, kept_client) = pair(&mut listener).await;
+    drop(listener);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let refused = blocking(|| StdTcpStream::connect_timeout(&addr(), Duration::from_secs(5))).await;
+    assert_eq!(refused.unwrap_err().kind(), ErrorKind::ConnectionRefused);
+    echo_check(&mut kept, kept_client, b"still served").await;
 }
