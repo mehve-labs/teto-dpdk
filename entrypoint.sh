@@ -1,7 +1,7 @@
 #!/bin/bash
 # Set up the network F-Stack uses in Docker, once, then run the command.
 #
-#   kernel (10.0.0.2) teto0 <══ veth pair ══> teto0-dpdk  ◀── DPDK af_packet ── F-Stack (10.0.0.1)
+#   kernel (10.0.0.2, fd00::2) teto0 <══ veth ══> teto0-dpdk ◀── DPDK af_packet ── F-Stack (10.0.0.1, fd00::1)
 #
 # DPDK's af_packet driver attaches to teto0-dpdk (no IP: the kernel stack
 # stays out of it); the kernel talks to F-Stack through teto0. Both ends have
@@ -15,6 +15,8 @@ DPDK_IF=teto0-dpdk
 if ! ip link show "$KERNEL_IF" > /dev/null 2>&1; then
     ip link add "$KERNEL_IF" type veth peer name "$DPDK_IF"
     ip addr add 10.0.0.2/24 dev "$KERNEL_IF"
+    # F-Stack is fd00::1 (config.ini); nodad: usable immediately.
+    ip -6 addr add fd00::2/64 dev "$KERNEL_IF" nodad
     # Fill in checksums in the kernel: veth otherwise hands over packets with
     # checksums left for "hardware" to complete, which F-Stack drops as corrupt.
     # (TSO goes off with it; spelled out so frames always fit the MTU.)

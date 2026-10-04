@@ -192,7 +192,9 @@ targets, and downstream applications would fail to link; CI builds
   real-NIC benchmarks yet (`scripts/bench.sh` describes how to run them).
   The low-level API avoids the hop; an async executor running on the F-Stack
   thread would avoid it while keeping async/await.
-- **IPv4 only.** IPv6 addresses are rejected explicitly.
+- **IPv6** needs an `addr6`/`prefix_len` for the port in `config.ini` (the
+  Docker config has `fd00::1/64`). Each socket is one family: an IPv6
+  listener doesn't accept IPv4 connections.
 - **UDP bursts to a peer F-Stack hasn't resolved yet.** While ARP resolves,
   FreeBSD queues at most 16 packets per destination (`net.link.arp.maxhold`,
   settable under `[freebsd.sysctl]` in `config.ini`); more are dropped. TCP

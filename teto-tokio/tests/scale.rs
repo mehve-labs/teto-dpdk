@@ -78,7 +78,7 @@ async fn exchange(msg: Vec<u8>) {
 
 /// Start the runtime with an echo server; returns the completed-echo count.
 async fn echo_server() -> Arc<AtomicUsize> {
-    let mut listener = listen(8080).await;
+    let listener = listen(8080).await;
     let served = Arc::new(AtomicUsize::new(0));
     let counter = served.clone();
     tokio::spawn(async move {

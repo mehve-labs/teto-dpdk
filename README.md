@@ -96,7 +96,8 @@ Behaviour worth knowing:
 - **Half-close.** `read` returning `Ok(0)` means the peer shut down its write side; you can still write a reply. `shutdown()` flushes and sends FIN.
 - **Errors.** A reset connection fails reads and writes with `ConnectionReset`. Dropping a stream closes it gracefully: buffered writes are sent, then FIN, and the socket is released once the peer has acknowledged everything. A peer that doesn't take the data within 30 s gets a reset.
 - **Runtime.** `TetoRuntime::start` runs F-Stack on a dedicated thread, once per process. Any number of listeners, UDP sockets and outbound connections (`TetoTcpStream::connect`) can be created from it. A failed bind leaves the runtime usable. The thread exits once every handle and socket has been dropped, after closing connections have delivered their data. F-Stack can't be restarted in the same process.
-- **Limits.** IPv4 only.
+- **tokio parity.** `into_split` (owned halves), `accept(&self)` from several tasks, `readable`/`writable`, `try_read`/`try_write`, `peek`, `set_nodelay`/`set_options` on a live connection (async, since options are applied on the F-Stack thread), `connect_from` a chosen local address, connected UDP (`connect`/`send`/`recv`), IPv4 and IPv6.
+- **Shutdown.** `TetoRuntime::shutdown().await` waits until every socket is closed and its data delivered, so call it at the end of `main` instead of exiting while data is in flight.
 
 ## Low-Level API (teto-dpdk)
 
@@ -138,7 +139,7 @@ Rules the API enforces:
 - `FStack::init` succeeds once per process (DPDK can't be re-initialised).
 - `FStack::run` runs once. When it returns (after `FStack::stop`, or a panic in your closure, which is re-raised), F-Stack tears itself down; afterwards every socket operation returns `BrokenPipe`.
 - kqueue registrations are level-triggered and carry a `u64` token you choose. Use tokens that are never reused, not descriptor numbers.
-- Unsupported input is an error, not a silent no-op: IPv6 addresses fail with `InvalidInput`, and a socket option F-Stack rejects fails the bind. There is no `quickack` option: FreeBSD has no per-socket `TCP_QUICKACK`; set `net.inet.tcp.delayed_ack=0` in `config.ini` to ACK immediately (global).
+- Unsupported input is an error, not a silent no-op: a socket option F-Stack rejects fails the bind, and mixing address families (e.g. an IPv6 destination on an IPv4 socket) fails with `InvalidInput`. There is no `quickack` option: FreeBSD has no per-socket `TCP_QUICKACK`; set `net.inet.tcp.delayed_ack=0` in `config.ini` to ACK immediately (global).
 
 ## Configuration
 

@@ -96,7 +96,7 @@ pub fn read_all(s: &mut StdTcpStream) -> Vec<u8> {
 }
 
 /// Connect a kernel client to `listener` (on `port`) and accept it.
-pub async fn pair(listener: &mut TetoTcpListener, port: u16) -> (TetoTcpStream, StdTcpStream) {
+pub async fn pair(listener: &TetoTcpListener, port: u16) -> (TetoTcpStream, StdTcpStream) {
     let client = tokio::task::spawn_blocking(move || connect(fstack(port)));
     let (server, peer) = timeout(T * 3, listener.accept()).await.expect("accept timed out").unwrap();
     let client = client.await.unwrap();

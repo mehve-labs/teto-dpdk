@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use teto_dpdk::{FStack, FStackConfig, TcpSocketOptions};
 
@@ -23,15 +23,23 @@ pub(crate) enum Cmd {
         reply: oneshot::Sender<io::Result<SocketAddr>>,
     },
     Connect {
+        local: Option<SocketAddr>,
         addr: SocketAddr,
         opts: TcpSocketOptions,
         reply: oneshot::Sender<io::Result<Connected>>,
+    },
+    SetOptions {
+        id: u64,
+        opts: TcpSocketOptions,
+        reply: oneshot::Sender<io::Result<()>>,
     },
 }
 
 struct Shared {
     cmd_tx: mpsc::UnboundedSender<Cmd>,
     init_output: &'static str,
+    /// Becomes `true` when the F-Stack thread has finished.
+    stopped: watch::Receiver<bool>,
 }
 
 /// Handle to the F-Stack runtime: a dedicated OS thread running F-Stack's
@@ -84,7 +92,17 @@ impl TetoRuntime {
     pub async fn start(cfg: FStackConfig) -> io::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel::<io::Result<&'static str>>();
+        let (stopped_tx, stopped) = watch::channel(false);
         std::thread::Builder::new().name("fstack".into()).spawn(move || {
+            // Marks the runtime stopped however the thread ends (normal stop,
+            // init failure, or a panic unwinding).
+            struct Stopped(watch::Sender<bool>);
+            impl Drop for Stopped {
+                fn drop(&mut self) {
+                    let _ = self.0.send(true);
+                }
+            }
+            let _stopped = Stopped(stopped_tx);
             let started = FStack::init(&cfg).and_then(|fs| Ok((fs, Driver::new(fs, cmd_rx)?)));
             let (fs, mut driver) = match started {
                 Ok(v) => v,
@@ -105,7 +123,22 @@ impl TetoRuntime {
         let init_output = ready_rx
             .await
             .map_err(|_| io::Error::other("F-Stack thread exited during initialisation"))??;
-        Ok(TetoRuntime { shared: Arc::new(Shared { cmd_tx, init_output }) })
+        Ok(TetoRuntime { shared: Arc::new(Shared { cmd_tx, init_output, stopped }) })
+    }
+
+    /// Drop this handle and wait until the runtime has stopped: after every
+    /// other handle and every socket created from the runtime has been
+    /// dropped, closing connections have delivered their data (or timed out),
+    /// and F-Stack has been torn down.
+    ///
+    /// Call it at the end of `main` so the process doesn't exit while data is
+    /// still being delivered. It waits for *all* sockets, so drop them first;
+    /// wrap it in `tokio::time::timeout` to bound the wait.
+    pub async fn shutdown(self) {
+        let mut stopped = self.shared.stopped.clone();
+        drop(self);
+        // An error means the thread is gone (its sender was dropped).
+        let _ = stopped.wait_for(|stopped| *stopped).await;
     }
 
     /// What F-Stack and DPDK printed during initialisation, if the config

@@ -48,7 +48,7 @@ const ACCEPT_QUEUE: usize = 1024;
 /// }
 /// ```
 pub struct TetoTcpListener {
-    accept_rx: mpsc::Receiver<AcceptItem>,
+    accept_rx: tokio::sync::Mutex<mpsc::Receiver<AcceptItem>>,
     local_addr: SocketAddr,
     rt: TetoRuntime,
 }
@@ -60,22 +60,23 @@ impl std::fmt::Debug for TetoTcpListener {
 }
 
 impl TetoTcpListener {
-    /// Listen on `addr` (IPv4 only). `opts` are applied to every accepted
+    /// Listen on `addr`. `opts` are applied to every accepted
     /// connection. A failure (e.g. an address not configured in
     /// `config.ini`) leaves the runtime usable.
     pub async fn bind(rt: &TetoRuntime, addr: SocketAddr, opts: TcpSocketOptions) -> io::Result<Self> {
-        crate::require_v4(addr)?;
         let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
         let local_addr = rt.call(|reply| Cmd::ListenTcp { addr, opts, accept_tx, reply }).await?;
-        Ok(TetoTcpListener { accept_rx, local_addr, rt: rt.clone() })
+        Ok(TetoTcpListener { accept_rx: tokio::sync::Mutex::new(accept_rx), local_addr, rt: rt.clone() })
     }
 
     /// Accept the next inbound connection.
     ///
     /// Per-connection failures (e.g. descriptor exhaustion) are returned as
     /// errors; the listener stays usable.
-    pub async fn accept(&mut self) -> io::Result<(TetoTcpStream, SocketAddr)> {
-        let connected = self.accept_rx.recv().await.ok_or_else(runtime_stopped)??;
+    /// Can be called from several tasks at once (each connection goes to one
+    /// of them).
+    pub async fn accept(&self) -> io::Result<(TetoTcpStream, SocketAddr)> {
+        let connected = self.accept_rx.lock().await.recv().await.ok_or_else(runtime_stopped)??;
         let peer = connected.peer;
         let stream = TetoTcpStream::from_connected(connected, self.rt.clone());
         stream.mark_accepted();

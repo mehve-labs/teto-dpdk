@@ -7,8 +7,7 @@ use std::net::{Shutdown, TcpStream as StdTcpStream};
 use std::time::Duration;
 
 use common::*;
-use teto_dpdk::TcpSocketOptions;
-use teto_tokio::{TetoRuntime, TetoTcpListener};
+use teto_tokio::TetoRuntime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
@@ -22,17 +21,10 @@ async fn runtime_is_a_process_wide_singleton() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ipv6_is_rejected() {
-    let rt = start().await;
-    let err = TetoTcpListener::bind(&rt, sa("[::1]:8080"), TcpSocketOptions::default()).await.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidInput);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn echo_and_clean_close() {
-    let mut listener = listen(PORT).await;
+    let listener = listen(PORT).await;
     assert_eq!(listener.local_addr(), fstack(PORT));
-    let (mut server, client) = pair(&mut listener, PORT).await;
+    let (mut server, client) = pair(&listener, PORT).await;
     let client = echo_check(&mut server, client, b"hello").await;
     drop(client);
     let mut rest = Vec::new();
@@ -43,8 +35,8 @@ async fn echo_and_clean_close() {
 /// The peer shuts down its write side and waits for the reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_half_close_still_gets_reply() {
-    let mut listener = listen(PORT).await;
-    let (mut server, mut client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut server, mut client) = pair(&listener, PORT).await;
     client.write_all(b"request").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
 
@@ -62,8 +54,8 @@ async fn peer_half_close_still_gets_reply() {
 /// Our shutdown sends FIN, but the peer can keep sending.
 #[tokio::test(flavor = "multi_thread")]
 async fn server_half_close_keeps_reading() {
-    let mut listener = listen(PORT).await;
-    let (mut server, mut client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut server, mut client) = pair(&listener, PORT).await;
     timeout(T, server.write_all(b"bye")).await.unwrap().unwrap();
     timeout(T, server.shutdown()).await.unwrap().unwrap();
     let err = server.write_all(b"more").await.unwrap_err();
@@ -86,8 +78,8 @@ async fn server_half_close_keeps_reading() {
 /// connection that reuses its descriptor.
 #[tokio::test(flavor = "multi_thread")]
 async fn reset_is_an_error_and_stale_handle_is_harmless() {
-    let mut listener = listen(PORT).await;
-    let (mut a, ca) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut a, ca) = pair(&listener, PORT).await;
     timeout(T, a.write_all(b"unread")).await.unwrap().unwrap();
     timeout(T, a.flush()).await.unwrap().unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -97,7 +89,7 @@ async fn reset_is_an_error_and_stale_handle_is_harmless() {
     assert_eq!(err.kind(), ErrorKind::ConnectionReset, "{err:?}");
 
     // a's descriptor is closed; the next connection most likely reuses it.
-    let (mut b, cb) = pair(&mut listener, PORT).await;
+    let (mut b, cb) = pair(&listener, PORT).await;
     let err = a.write_all(b"STALE").await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConnectionReset);
     drop(a);
@@ -121,8 +113,8 @@ async fn reset_is_an_error_and_stale_handle_is_harmless() {
 /// still succeed: F-Stack's `shutdown` on a reset socket returns 0.)
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_reset_reported_on_next_write() {
-    let mut listener = listen(PORT).await;
-    let (mut server, client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut server, client) = pair(&listener, PORT).await;
     client.shutdown(Shutdown::Write).unwrap();
     assert_eq!(timeout(T, server.read(&mut [0u8; 8])).await.unwrap().unwrap(), 0);
     timeout(T, server.write_all(b"unread")).await.unwrap().unwrap();
@@ -141,12 +133,12 @@ async fn idle_reset_reported_on_next_write() {
 /// Dropping a stream closes it; the next connection is unaffected.
 #[tokio::test(flavor = "multi_thread")]
 async fn drop_closes_and_next_connection_is_unaffected() {
-    let mut listener = listen(PORT).await;
+    let listener = listen(PORT).await;
     for _ in 0..5 {
-        let (a, mut ca) = pair(&mut listener, PORT).await;
+        let (a, mut ca) = pair(&listener, PORT).await;
         drop(a);
         assert_eq!(blocking(move || ca.read(&mut [0u8; 4]).unwrap()).await, 0);
-        let (mut b, cb) = pair(&mut listener, PORT).await;
+        let (mut b, cb) = pair(&listener, PORT).await;
         echo_check(&mut b, cb, b"fresh").await;
     }
 }
@@ -156,8 +148,8 @@ async fn drop_closes_and_next_connection_is_unaffected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_reader_gets_backpressure_and_stack_stays_responsive() {
     const LEN: usize = 16 * 1024 * 1024;
-    let mut listener = listen(PORT).await;
-    let (mut slow, mut slow_client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut slow, mut slow_client) = pair(&listener, PORT).await;
     let writer = tokio::spawn(async move {
         slow.write_all(&pattern(LEN, 0)).await.unwrap();
         slow.shutdown().await.unwrap();
@@ -165,7 +157,7 @@ async fn slow_reader_gets_backpressure_and_stack_stays_responsive() {
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!writer.is_finished(), "16 MiB write to a non-reading peer completed: no backpressure");
 
-    let (mut other, other_client) = pair(&mut listener, PORT).await;
+    let (mut other, other_client) = pair(&listener, PORT).await;
     echo_check(&mut other, other_client, b"not frozen").await;
 
     let got = blocking(move || read_all(&mut slow_client)).await;
@@ -178,8 +170,8 @@ async fn slow_reader_gets_backpressure_and_stack_stays_responsive() {
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_consumer_loses_nothing() {
     const LEN: usize = 16 * 1024 * 1024;
-    let mut listener = listen(PORT).await;
-    let (mut server, mut client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut server, mut client) = pair(&listener, PORT).await;
     let sender = tokio::task::spawn_blocking(move || {
         client.write_all(&pattern(LEN, 0)).unwrap();
         client.shutdown(Shutdown::Write).unwrap();
@@ -200,8 +192,8 @@ async fn slow_consumer_loses_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn drop_delivers_buffered_writes() {
     const LEN: usize = 1024 * 1024;
-    let mut listener = listen(PORT).await;
-    let (mut server, mut client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await;
+    let (mut server, mut client) = pair(&listener, PORT).await;
     let data = pattern(LEN, 0);
     let mut sent = 0;
     // Fill the user-space buffer without waiting for it to drain.
@@ -220,7 +212,7 @@ async fn drop_delivers_buffered_writes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn many_concurrent_connections() {
     const N: usize = 200;
-    let mut listener = listen(PORT).await;
+    let listener = listen(PORT).await;
     let clients = tokio::task::spawn_blocking(|| {
         let handles: Vec<_> = (0..N)
             .map(|i| {
@@ -260,8 +252,8 @@ async fn many_concurrent_connections() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dropped_listener_refuses_and_last_stream_is_delivered() {
     const LEN: usize = 4 * 1024 * 1024;
-    let mut listener = listen(PORT).await; // the listener holds the only runtime handle
-    let (mut kept, kept_client) = pair(&mut listener, PORT).await;
+    let listener = listen(PORT).await; // the listener holds the only runtime handle
+    let (mut kept, kept_client) = pair(&listener, PORT).await;
     drop(listener);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let refused = blocking(|| StdTcpStream::connect_timeout(&fstack(PORT), Duration::from_secs(5))).await;

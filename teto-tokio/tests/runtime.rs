@@ -18,7 +18,7 @@ fn opts() -> TcpSocketOptions {
 }
 
 /// Accept one connection on `listener` and echo a message from a kernel client.
-async fn check_listener(listener: &mut TetoTcpListener, addr: SocketAddr, msg: &'static [u8]) {
+async fn check_listener(listener: &TetoTcpListener, addr: SocketAddr, msg: &'static [u8]) {
     let client = tokio::task::spawn_blocking(move || {
         let mut c = connect(addr);
         c.write_all(msg).unwrap();
@@ -70,20 +70,20 @@ async fn failed_bind_leaves_runtime_usable() {
     let rt = start().await;
     let err = TetoTcpListener::bind(&rt, sa("10.0.0.99:8080"), opts()).await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::AddrNotAvailable, "{err:?}");
-    let mut a = TetoTcpListener::bind(&rt, fstack(8080), opts()).await.expect("bind 8080");
+    let a = TetoTcpListener::bind(&rt, fstack(8080), opts()).await.expect("bind 8080");
     let err = TetoTcpListener::bind(&rt, fstack(8080), opts()).await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::AddrInUse, "{err:?}");
-    check_listener(&mut a, fstack(8080), b"after a failed bind").await;
+    check_listener(&a, fstack(8080), b"after a failed bind").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn several_listeners_and_udp_on_one_runtime() {
     let rt = start().await;
-    let mut a = TetoTcpListener::bind(&rt, sa("0.0.0.0:8080"), opts()).await.expect("bind 8080");
-    let mut b = TetoTcpListener::bind(&rt, sa("0.0.0.0:8081"), opts()).await.expect("bind 8081");
+    let a = TetoTcpListener::bind(&rt, sa("0.0.0.0:8080"), opts()).await.expect("bind 8080");
+    let b = TetoTcpListener::bind(&rt, sa("0.0.0.0:8081"), opts()).await.expect("bind 8081");
     let udp = TetoUdpSocket::bind(&rt, sa("0.0.0.0:9000")).await.expect("bind udp");
-    check_listener(&mut a, fstack(8080), b"via 8080").await;
-    check_listener(&mut b, fstack(8081), b"via 8081").await;
+    check_listener(&a, fstack(8080), b"via 8080").await;
+    check_listener(&b, fstack(8081), b"via 8081").await;
 
     let peer = blocking(|| {
         let c = StdUdpSocket::bind("0.0.0.0:0").unwrap();

@@ -38,13 +38,40 @@ int64_t neg_errno() {
 int64_t ret64(int64_t r) { return r < 0 ? neg_errno() : r; }
 int32_t ret32(int r) { return r < 0 ? static_cast<int32_t>(neg_errno()) : r; }
 
-struct sockaddr_in make_addr(uint32_t ip, uint16_t port) {
-    struct sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(ip);
-    return addr;
+// Fill a Linux-layout sockaddr (F-Stack translates Linux sockaddrs) from a
+// SockAddr; returns its length.
+socklen_t to_sockaddr(const SockAddr& a, struct sockaddr_storage& ss) {
+    std::memset(&ss, 0, sizeof(ss));
+    if (a.v6) {
+        auto* s6 = reinterpret_cast<struct sockaddr_in6*>(&ss);
+        s6->sin6_family = AF_INET6;
+        s6->sin6_port = htons(a.port);
+        s6->sin6_flowinfo = htonl(a.flowinfo);
+        std::memcpy(&s6->sin6_addr, a.ip.data(), 16);
+        s6->sin6_scope_id = a.scope_id;
+        return sizeof(struct sockaddr_in6);
+    }
+    auto* s4 = reinterpret_cast<struct sockaddr_in*>(&ss);
+    s4->sin_family = AF_INET;
+    s4->sin_port = htons(a.port);
+    std::memcpy(&s4->sin_addr, a.ip.data(), 4);
+    return sizeof(struct sockaddr_in);
+}
+
+void from_sockaddr(const struct sockaddr_storage& ss, SockAddr& out) {
+    out = SockAddr{};
+    if (ss.ss_family == AF_INET6) {
+        const auto* s6 = reinterpret_cast<const struct sockaddr_in6*>(&ss);
+        out.v6 = true;
+        out.port = ntohs(s6->sin6_port);
+        out.flowinfo = ntohl(s6->sin6_flowinfo);
+        std::memcpy(out.ip.data(), &s6->sin6_addr, 16);
+        out.scope_id = s6->sin6_scope_id;
+    } else {
+        const auto* s4 = reinterpret_cast<const struct sockaddr_in*>(&ss);
+        out.port = ntohs(s4->sin_port);
+        std::memcpy(out.ip.data(), &s4->sin_addr, 4);
+    }
 }
 
 const struct timespec ZERO_TIMEOUT = {0, 0};
@@ -166,8 +193,8 @@ void stop() {
     ff_stop_run();
 }
 
-int32_t sock_tcp() { return ret32(ff_socket(AF_INET, SOCK_STREAM, 0)); }
-int32_t sock_udp() { return ret32(ff_socket(AF_INET, SOCK_DGRAM, 0)); }
+int32_t sock_tcp(bool v6) { return ret32(ff_socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0)); }
+int32_t sock_udp(bool v6) { return ret32(ff_socket(v6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0)); }
 
 int32_t sock_set_nonblocking(int32_t fd) {
     int on = 1;
@@ -200,18 +227,20 @@ int32_t sock_set_opt(int32_t fd, SockOpt opt, int32_t value) {
     return ret32(ff_setsockopt(fd, level, name, &v, sizeof(v)));
 }
 
-int32_t sock_bind_v4(int32_t fd, uint32_t ip, uint16_t port) {
-    struct sockaddr_in addr = make_addr(ip, port);
-    return ret32(ff_bind(fd, reinterpret_cast<struct linux_sockaddr*>(&addr), sizeof(addr)));
+int32_t sock_bind(int32_t fd, const SockAddr& addr) {
+    struct sockaddr_storage ss;
+    socklen_t len = to_sockaddr(addr, ss);
+    return ret32(ff_bind(fd, reinterpret_cast<struct linux_sockaddr*>(&ss), len));
 }
 
 int32_t sock_listen(int32_t fd, int32_t backlog) {
     return ret32(ff_listen(fd, backlog));
 }
 
-int32_t sock_connect_v4(int32_t fd, uint32_t ip, uint16_t port) {
-    struct sockaddr_in addr = make_addr(ip, port);
-    return ret32(ff_connect(fd, reinterpret_cast<struct linux_sockaddr*>(&addr), sizeof(addr)));
+int32_t sock_connect(int32_t fd, const SockAddr& addr) {
+    struct sockaddr_storage ss;
+    socklen_t len = to_sockaddr(addr, ss);
+    return ret32(ff_connect(fd, reinterpret_cast<struct linux_sockaddr*>(&ss), len));
 }
 
 int32_t sock_take_error(int32_t fd) {
@@ -228,28 +257,26 @@ int32_t sock_take_error(int32_t fd) {
     return errno != 0 ? errno : EIO;
 }
 
-int32_t sock_accept_v4(int32_t fd, uint32_t& ip, uint16_t& port) {
-    struct sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    socklen_t len = sizeof(addr);
-    int r = ff_accept(fd, reinterpret_cast<struct linux_sockaddr*>(&addr), &len);
+int32_t sock_accept(int32_t fd, SockAddr& peer) {
+    struct sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    socklen_t len = sizeof(ss);
+    int r = ff_accept(fd, reinterpret_cast<struct linux_sockaddr*>(&ss), &len);
     if (r < 0) {
         return static_cast<int32_t>(neg_errno());
     }
-    ip = ntohl(addr.sin_addr.s_addr);
-    port = ntohs(addr.sin_port);
+    from_sockaddr(ss, peer);
     return r;
 }
 
-int32_t sock_local_addr_v4(int32_t fd, uint32_t& ip, uint16_t& port) {
-    struct sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    socklen_t len = sizeof(addr);
-    if (ff_getsockname(fd, reinterpret_cast<struct linux_sockaddr*>(&addr), &len) < 0) {
+int32_t sock_local_addr(int32_t fd, SockAddr& out) {
+    struct sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    socklen_t len = sizeof(ss);
+    if (ff_getsockname(fd, reinterpret_cast<struct linux_sockaddr*>(&ss), &len) < 0) {
         return static_cast<int32_t>(neg_errno());
     }
-    ip = ntohl(addr.sin_addr.s_addr);
-    port = ntohs(addr.sin_port);
+    from_sockaddr(ss, out);
     return 0;
 }
 
@@ -261,23 +288,22 @@ int64_t sock_write(int32_t fd, rust::Slice<const uint8_t> buf) {
     return ret64(ff_write(fd, buf.data(), buf.size()));
 }
 
-int64_t sock_recvfrom_v4(int32_t fd, uint8_t* buf, size_t len, uint32_t& ip, uint16_t& port) {
-    struct sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    socklen_t addrlen = sizeof(addr);
-    ssize_t r = ff_recvfrom(fd, buf, len, 0, reinterpret_cast<struct linux_sockaddr*>(&addr), &addrlen);
+int64_t sock_recvfrom(int32_t fd, uint8_t* buf, size_t len, SockAddr& from) {
+    struct sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    socklen_t addrlen = sizeof(ss);
+    ssize_t r = ff_recvfrom(fd, buf, len, 0, reinterpret_cast<struct linux_sockaddr*>(&ss), &addrlen);
     if (r < 0) {
         return neg_errno();
     }
-    ip = ntohl(addr.sin_addr.s_addr);
-    port = ntohs(addr.sin_port);
+    from_sockaddr(ss, from);
     return r;
 }
 
-int64_t sock_sendto_v4(int32_t fd, rust::Slice<const uint8_t> buf, uint32_t ip, uint16_t port) {
-    struct sockaddr_in addr = make_addr(ip, port);
-    return ret64(ff_sendto(fd, buf.data(), buf.size(), 0,
-                           reinterpret_cast<struct linux_sockaddr*>(&addr), sizeof(addr)));
+int64_t sock_sendto(int32_t fd, rust::Slice<const uint8_t> buf, const SockAddr& to) {
+    struct sockaddr_storage ss;
+    socklen_t len = to_sockaddr(to, ss);
+    return ret64(ff_sendto(fd, buf.data(), buf.size(), 0, reinterpret_cast<struct linux_sockaddr*>(&ss), len));
 }
 
 int32_t sock_shutdown(int32_t fd, int32_t how) {

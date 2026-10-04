@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Starting async TCP echo server on {addr}...");
     let rt = TetoRuntime::start(cfg).await?;
-    let mut listener = TetoTcpListener::bind(&rt, addr, opts).await?;
+    let listener = TetoTcpListener::bind(&rt, addr, opts).await?;
     println!("Listening — ready for connections.");
 
     loop {

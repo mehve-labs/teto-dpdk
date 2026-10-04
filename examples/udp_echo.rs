@@ -22,7 +22,7 @@ fn main() -> io::Result<()> {
         loop {
             match socket.recv_from(&mut buf) {
                 Ok((n, peer)) => {
-                    if let Err(e) = socket.send_to(&buf[..n], peer.into()) {
+                    if let Err(e) = socket.send_to(&buf[..n], peer) {
                         eprintln!("[{peer}] send failed: {e}");
                     }
                 }

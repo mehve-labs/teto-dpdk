@@ -100,7 +100,7 @@ impl Drop for Faults {
     }
 }
 
-async fn accept(listener: &mut TetoTcpListener) -> TetoTcpStream {
+async fn accept(listener: &TetoTcpListener) -> TetoTcpStream {
     timeout(Duration::from_secs(60), listener.accept()).await.expect("accept timed out").unwrap().0
 }
 
@@ -129,17 +129,17 @@ async fn serve_echo(mut server: TetoTcpStream) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lossy_link_delivers_everything() {
-    lossy_link(&mut listen(PORT).await).await;
+    lossy_link(&listen(PORT).await).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovers_from_outage_of_fstack_packets() {
-    outage_from_fstack(&mut listen(PORT).await).await;
+    outage_from_fstack(&listen(PORT).await).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovers_from_outage_of_kernel_packets() {
-    outage_to_fstack(&mut listen(PORT).await).await;
+    outage_to_fstack(&listen(PORT).await).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -149,7 +149,7 @@ async fn silent_peer_is_detected_by_keepalive() {
 
 /// Loss, delay and reordering in both directions: every byte still arrives,
 /// in order, on several concurrent connections.
-async fn lossy_link(listener: &mut TetoTcpListener) {
+async fn lossy_link(listener: &TetoTcpListener) {
     const LEN: usize = 512 * 1024;
     let faults = Faults::new();
     faults.to_fstack("delay 2ms 1ms loss 3% reorder 5% 50%");
@@ -187,7 +187,7 @@ async fn lossy_link(listener: &mut TetoTcpListener) {
 /// F-Stack's packets are black-holed for 3 s in the middle of a transfer.
 /// Nothing F-Stack sends gets through, so no ACKs come back either: only
 /// F-Stack's own retransmission timer can restart the transfer.
-async fn outage_from_fstack(listener: &mut TetoTcpListener) {
+async fn outage_from_fstack(listener: &TetoTcpListener) {
     const LEN: usize = 4 * 1024 * 1024;
     let faults = Faults::new();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
@@ -235,7 +235,7 @@ async fn outage_from_fstack(listener: &mut TetoTcpListener) {
 /// The kernel's packets to F-Stack are lost for 3 s in the middle of an
 /// upload (recovery here is the kernel's retransmission; F-Stack must
 /// handle the retransmitted segments and keep its window consistent).
-async fn outage_to_fstack(listener: &mut TetoTcpListener) {
+async fn outage_to_fstack(listener: &TetoTcpListener) {
     const LEN: usize = 4 * 1024 * 1024;
     let faults = Faults::new();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
@@ -275,7 +275,7 @@ async fn silent_peer_detected_by_keepalive(rt: &TetoRuntime) {
         .keepalive_idle_secs(1)
         .keepalive_interval_secs(1)
         .keepalive_count(3);
-    let mut listener = TetoTcpListener::bind(rt, fstack(8081), keepalive).await.expect("bind 8081");
+    let listener = TetoTcpListener::bind(rt, fstack(8081), keepalive).await.expect("bind 8081");
     let client = tokio::task::spawn_blocking(|| connect(fstack(8081)));
     let (mut server, _) = timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
     let client = client.await.unwrap();

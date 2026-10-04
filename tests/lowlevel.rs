@@ -25,12 +25,15 @@ fn init_is_once_per_process() {
 #[test]
 fn bind_errors_are_reported() {
     let fs = init();
-    assert_eq!(TcpListener::bind(&fs, sa("[::1]:8080"), &opts()).unwrap_err().kind(), ErrorKind::InvalidInput);
     let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).expect("bind");
     assert_eq!(listener.local_addr().unwrap().port(), 8080);
     assert_eq!(TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts()).unwrap_err().kind(), ErrorKind::AddrInUse);
-    let udp = UdpSocket::bind(&fs, sa("0.0.0.0:9000")).unwrap();
-    assert_eq!(udp.send_to(b"x", sa("[::1]:9")).unwrap_err().kind(), ErrorKind::InvalidInput);
+    // An address this port doesn't have.
+    assert_eq!(TcpListener::bind(&fs, sa("10.0.0.99:8080"), &opts()).unwrap_err().kind(), ErrorKind::AddrNotAvailable);
+    // IPv6 works (config.ini gives the port fd00::1).
+    let v6 = TcpListener::bind(&fs, sa("[fd00::1]:8080"), &opts()).expect("bind v6");
+    assert_eq!(v6.local_addr().unwrap(), sa("[fd00::1]:8080"));
+    let _udp = UdpSocket::bind(&fs, sa("0.0.0.0:9000")).unwrap();
 }
 
 /// Re-entering the poll loop from inside it is refused.
@@ -198,7 +201,7 @@ impl UdpEcho<'_> {
         loop {
             match self.socket.recv_from(&mut self.buf) {
                 Ok((n, peer)) => {
-                    let _ = self.socket.send_to(&self.buf[..n], peer.into());
+                    let _ = self.socket.send_to(&self.buf[..n], peer);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => panic!("recv: {e}"),

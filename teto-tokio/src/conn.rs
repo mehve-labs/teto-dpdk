@@ -95,8 +95,17 @@ pub(crate) struct ConnState {
     pub error: Option<ConnError>,
     /// Already queued in the `Notifier`; avoids duplicate entries.
     pub notified: bool,
-    pub read_waker: Option<Waker>,
-    pub write_waker: Option<Waker>,
+    /// Tasks waiting to read (or for readability); woken all at once.
+    pub read_wakers: Vec<Waker>,
+    /// Tasks waiting to write, flush, shut down (or for writability).
+    pub write_wakers: Vec<Waker>,
+}
+
+/// Add `waker` to `wakers` unless an equivalent one is already there.
+pub(crate) fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
+    if !wakers.iter().any(|w| w.will_wake(waker)) {
+        wakers.push(waker.clone());
+    }
 }
 
 pub(crate) struct Conn {
@@ -129,11 +138,11 @@ pub(crate) struct Wakes(Vec<Waker>);
 
 impl Wakes {
     pub(crate) fn read(&mut self, st: &mut ConnState) {
-        self.0.extend(st.read_waker.take());
+        self.0.append(&mut st.read_wakers);
     }
 
     pub(crate) fn write(&mut self, st: &mut ConnState) {
-        self.0.extend(st.write_waker.take());
+        self.0.append(&mut st.write_wakers);
     }
 
     pub(crate) fn fire(self) {

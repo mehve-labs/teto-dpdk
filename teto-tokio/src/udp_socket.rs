@@ -1,5 +1,5 @@
 use std::io;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
@@ -10,7 +10,6 @@ use teto_dpdk::net::UdpSocket;
 
 use crate::conn::lock;
 use crate::runtime::{runtime_stopped, Cmd, TetoRuntime};
-use crate::require_v4;
 
 /// Datagrams buffered in each direction between tokio and the F-Stack thread.
 const QUEUE: usize = 1024;
@@ -31,7 +30,7 @@ struct Shared {
 /// The F-Stack-thread ends of a socket's channels, sent with the bind command.
 pub(crate) struct UdpParts {
     rx_tx: mpsc::Sender<RxItem>,
-    tx_rx: mpsc::Receiver<(Bytes, SocketAddrV4)>,
+    tx_rx: mpsc::Receiver<(Bytes, SocketAddr)>,
     shared: Arc<Shared>,
 }
 
@@ -61,9 +60,11 @@ pub(crate) struct UdpParts {
 /// ```
 pub struct TetoUdpSocket {
     rx: tokio::sync::Mutex<mpsc::Receiver<RxItem>>,
-    tx: mpsc::Sender<(Bytes, SocketAddrV4)>,
+    tx: mpsc::Sender<(Bytes, SocketAddr)>,
     shared: Arc<Shared>,
     local_addr: SocketAddr,
+    /// Default peer set by [`connect`](TetoUdpSocket::connect).
+    peer: std::sync::Mutex<Option<SocketAddr>>,
     _rt: TetoRuntime,
 }
 
@@ -74,10 +75,9 @@ impl std::fmt::Debug for TetoUdpSocket {
 }
 
 impl TetoUdpSocket {
-    /// Bind a UDP socket on `addr` (IPv4 only). Datagrams queued with
-    /// `send_to` are still sent after the socket is dropped.
+    /// Bind a UDP socket on `addr`. Datagrams queued with `send_to` are still
+    /// sent after the socket is dropped.
     pub async fn bind(rt: &TetoRuntime, addr: SocketAddr) -> io::Result<Self> {
-        require_v4(addr)?;
         let (rx_tx, rx_rx) = mpsc::channel(QUEUE);
         let (tx_tx, tx_rx) = mpsc::channel(QUEUE);
         let shared = Arc::new(Shared::default());
@@ -88,28 +88,67 @@ impl TetoUdpSocket {
             tx: tx_tx,
             shared,
             local_addr,
+            peer: std::sync::Mutex::new(None),
             _rt: rt.clone(),
         })
+    }
+
+    /// Set the default peer: [`send`](Self::send) goes to it, and datagrams
+    /// from any other address are discarded (as with a connected kernel UDP
+    /// socket). Can be called again to change the peer.
+    pub async fn connect(&self, addr: SocketAddr) -> io::Result<()> {
+        if addr.is_ipv6() != self.local_addr.is_ipv6() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "address family differs from the socket's"));
+        }
+        *lock(&self.peer) = Some(addr);
+        Ok(())
+    }
+
+    /// The default peer set by [`connect`](Self::connect).
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        lock(&self.peer).ok_or_else(|| io::ErrorKind::NotConnected.into())
+    }
+
+    /// Send a datagram to the peer set by [`connect`](Self::connect).
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        let peer = self.peer_addr()?;
+        self.send_to(buf, peer).await
+    }
+
+    /// Receive a datagram from the peer set by [`connect`](Self::connect).
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.peer_addr()?;
+        Ok(self.recv_from(buf).await?.0)
     }
 
     /// Receive a datagram, returning the number of bytes copied into `buf`
     /// and the sender's address. If the datagram is larger than `buf`, the
     /// excess is discarded. Receive errors reported by F-Stack are returned.
+    ///
+    /// After [`connect`](Self::connect), only datagrams from the peer are
+    /// returned.
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let item = self.rx.lock().await.recv().await;
-        let (data, addr) = item.ok_or_else(runtime_stopped)??;
-        let n = data.len().min(buf.len());
-        buf[..n].copy_from_slice(&data[..n]);
-        Ok((n, addr))
+        let mut rx = self.rx.lock().await;
+        loop {
+            let (data, addr) = rx.recv().await.ok_or_else(runtime_stopped)??;
+            if lock(&self.peer).is_some_and(|peer| peer != addr) {
+                continue;
+            }
+            let n = data.len().min(buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
+            return Ok((n, addr));
+        }
     }
 
-    /// Queue a datagram to `addr` (IPv4 only), waiting while the send queue is
-    /// full. Returns `buf.len()` once queued.
+    /// Queue a datagram to `addr`, waiting while the send queue is full.
+    /// Returns `buf.len()` once queued.
     ///
     /// Sending happens on the F-Stack thread, so a failure is reported by the
     /// next `send_to` call (similar to how kernel sockets report ICMP errors).
     pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
-        let addr = require_v4(addr)?;
+        if addr.is_ipv6() != self.local_addr.is_ipv6() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "address family differs from the socket's"));
+        }
         if let Some(e) = lock(&self.shared.send_error).take() {
             return Err(e);
         }
@@ -135,11 +174,11 @@ fn is_transient_send_error(e: &io::Error) -> bool {
 pub(crate) struct UdpEntry {
     socket: UdpSocket,
     rx_tx: mpsc::Sender<RxItem>,
-    tx_rx: mpsc::Receiver<(Bytes, SocketAddrV4)>,
+    tx_rx: mpsc::Receiver<(Bytes, SocketAddr)>,
     /// The `TetoUdpSocket` is gone and its send queue is empty.
     tx_done: bool,
     /// A datagram F-Stack couldn't take yet; retried next tick.
-    pending: Option<(Bytes, SocketAddrV4)>,
+    pending: Option<(Bytes, SocketAddr)>,
     rx_buf: BytesMut,
     shared: Arc<Shared>,
     /// Receive interest withdrawn because the application's queue is full
@@ -201,7 +240,7 @@ impl UdpEntry {
                     }
                 },
             };
-            match self.socket.send_to(&data, addr.into()) {
+            match self.socket.send_to(&data, addr) {
                 Ok(_) => {}
                 Err(e) if is_transient_send_error(&e) => {
                     self.pending = Some((data, addr));
@@ -231,7 +270,7 @@ impl UdpEntry {
                 Ok((n, from)) => {
                     // SAFETY: F-Stack initialised the first `n` spare bytes.
                     unsafe { self.rx_buf.set_len(n) };
-                    permit.send(Ok((self.rx_buf.split().freeze(), from.into())));
+                    permit.send(Ok((self.rx_buf.split().freeze(), from)));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return RecvStop::Drained,
                 Err(e) => {

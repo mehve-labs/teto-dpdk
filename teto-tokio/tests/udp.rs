@@ -41,12 +41,10 @@ fn echo(socket: Arc<TetoUdpSocket>) -> tokio::task::JoinHandle<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ipv6_is_rejected() {
+async fn address_family_mismatch_is_rejected() {
     let rt = start().await;
-    let err = TetoUdpSocket::bind(&rt, sa("[::1]:9000")).await.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidInput);
     let socket = TetoUdpSocket::bind(&rt, fstack(PORT)).await.expect("bind");
-    let err = socket.send_to(b"x", sa("[::1]:9")).await.unwrap_err();
+    let err = socket.send_to(b"x", sa("[fd00::2]:9")).await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidInput);
 }
 

@@ -21,6 +21,16 @@ pub(crate) mod ffi {
         udata: u64,
     }
 
+    /// An IPv4 or IPv6 socket address (IPv4 uses the first 4 bytes of `ip`).
+    #[derive(Clone, Copy, Debug, Default)]
+    struct SockAddr {
+        v6: bool,
+        ip: [u8; 16],
+        port: u16,
+        flowinfo: u32,
+        scope_id: u32,
+    }
+
     #[repr(i32)]
     enum SockOpt {
         ReuseAddr,
@@ -53,27 +63,21 @@ pub(crate) mod ffi {
         fn run(ctx: &mut LoopCtx);
         fn stop();
 
-        fn sock_tcp() -> i32;
-        fn sock_udp() -> i32;
+        fn sock_tcp(v6: bool) -> i32;
+        fn sock_udp(v6: bool) -> i32;
         fn sock_set_nonblocking(fd: i32) -> i32;
         fn sock_set_opt(fd: i32, opt: SockOpt, value: i32) -> i32;
-        fn sock_bind_v4(fd: i32, ip: u32, port: u16) -> i32;
+        fn sock_bind(fd: i32, addr: &SockAddr) -> i32;
         fn sock_listen(fd: i32, backlog: i32) -> i32;
-        fn sock_connect_v4(fd: i32, ip: u32, port: u16) -> i32;
+        fn sock_connect(fd: i32, addr: &SockAddr) -> i32;
         /// Pending socket error (positive Linux errno), 0 if none, or -errno.
         fn sock_take_error(fd: i32) -> i32;
-        fn sock_accept_v4(fd: i32, ip: &mut u32, port: &mut u16) -> i32;
-        fn sock_local_addr_v4(fd: i32, ip: &mut u32, port: &mut u16) -> i32;
+        fn sock_accept(fd: i32, peer: &mut SockAddr) -> i32;
+        fn sock_local_addr(fd: i32, out: &mut SockAddr) -> i32;
         unsafe fn sock_read(fd: i32, buf: *mut u8, len: usize) -> i64;
         fn sock_write(fd: i32, buf: &[u8]) -> i64;
-        unsafe fn sock_recvfrom_v4(
-            fd: i32,
-            buf: *mut u8,
-            len: usize,
-            ip: &mut u32,
-            port: &mut u16,
-        ) -> i64;
-        fn sock_sendto_v4(fd: i32, buf: &[u8], ip: u32, port: u16) -> i64;
+        unsafe fn sock_recvfrom(fd: i32, buf: *mut u8, len: usize, from: &mut SockAddr) -> i64;
+        fn sock_sendto(fd: i32, buf: &[u8], to: &SockAddr) -> i64;
         fn sock_shutdown(fd: i32, how: i32) -> i32;
         fn sock_unsent(fd: i32) -> i32;
         fn sock_close(fd: i32) -> i32;
@@ -81,6 +85,31 @@ pub(crate) mod ffi {
         fn kq_create() -> i32;
         fn kq_change(kq: i32, change: &KEvent) -> i32;
         fn kq_poll(kq: i32, events: &mut [KEvent]) -> i32;
+    }
+}
+
+impl ffi::SockAddr {
+    pub(crate) fn from_std(addr: std::net::SocketAddr) -> Self {
+        let mut out = ffi::SockAddr { port: addr.port(), ..Default::default() };
+        match addr {
+            std::net::SocketAddr::V4(a) => out.ip[..4].copy_from_slice(&a.ip().octets()),
+            std::net::SocketAddr::V6(a) => {
+                out.v6 = true;
+                out.ip = a.ip().octets();
+                out.flowinfo = a.flowinfo();
+                out.scope_id = a.scope_id();
+            }
+        }
+        out
+    }
+
+    pub(crate) fn to_std(self) -> std::net::SocketAddr {
+        if self.v6 {
+            std::net::SocketAddrV6::new(self.ip.into(), self.port, self.flowinfo, self.scope_id).into()
+        } else {
+            let ip: [u8; 4] = self.ip[..4].try_into().unwrap();
+            std::net::SocketAddrV4::new(ip.into(), self.port).into()
+        }
     }
 }
 

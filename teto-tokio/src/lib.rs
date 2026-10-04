@@ -16,15 +16,5 @@ mod udp_socket;
 
 pub use runtime::TetoRuntime;
 pub use tcp_listener::TetoTcpListener;
-pub use tcp_stream::TetoTcpStream;
+pub use tcp_stream::{OwnedReadHalf, OwnedWriteHalf, ReuniteError, TetoTcpStream};
 pub use udp_socket::TetoUdpSocket;
-
-fn require_v4(addr: std::net::SocketAddr) -> std::io::Result<std::net::SocketAddrV4> {
-    match addr {
-        std::net::SocketAddr::V4(a) => Ok(a),
-        std::net::SocketAddr::V6(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "IPv6 is not supported by teto-dpdk",
-        )),
-    }
-}

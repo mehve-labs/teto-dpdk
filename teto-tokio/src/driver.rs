@@ -221,7 +221,7 @@ impl Driver {
             Cmd::ListenTcp { addr, opts, accept_tx, reply } => {
                 let id = self.next_id();
                 let listening = TcpListener::bind(&self.fs, addr, &opts).and_then(|listener| {
-                    let local = listener.local_addr()?.into();
+                    let local = listener.local_addr()?;
                     self.kq.register(&listener, id, Interest::READABLE)?;
                     Ok((listener, local))
                 });
@@ -238,7 +238,7 @@ impl Driver {
             Cmd::BindUdp { addr, parts, reply } => {
                 let id = self.next_id();
                 let bound = UdpSocket::bind(&self.fs, addr).and_then(|s| {
-                    let local = s.local_addr()?.into();
+                    let local = s.local_addr()?;
                     self.kq.register(&s, id, Interest::READABLE)?;
                     Ok((s, local))
                 });
@@ -251,9 +251,13 @@ impl Driver {
                     Err(e) => drop(reply.send(Err(e))),
                 }
             }
-            Cmd::Connect { addr, opts, reply } => {
+            Cmd::Connect { local, addr, opts, reply } => {
                 let id = self.next_id();
-                let started = TcpStream::connect(&self.fs, addr, &opts).and_then(|stream| {
+                let started = match local {
+                    Some(local) => TcpStream::connect_from(&self.fs, local, addr, &opts),
+                    None => TcpStream::connect(&self.fs, addr, &opts),
+                };
+                let started = started.and_then(|stream| {
                     self.kq.register(&stream, id, Interest::WRITABLE)?;
                     Ok(stream)
                 });
@@ -263,6 +267,13 @@ impl Driver {
                     }
                     Err(e) => drop(reply.send(Err(e))),
                 }
+            }
+            Cmd::SetOptions { id, opts, reply } => {
+                let result = match self.conns.get(&id) {
+                    Some(entry) => entry.stream.set_options(&opts),
+                    None => Err(io::Error::new(io::ErrorKind::NotConnected, "connection is closed")),
+                };
+                let _ = reply.send(result);
             }
         }
     }
@@ -322,10 +333,10 @@ impl Driver {
                     // `desired_interest`), so queued connections don't buffer.
                     // The listener may be bound to a wildcard address; report
                     // the address this connection actually arrived on.
-                    let local = stream.local_addr().map(SocketAddr::V4).unwrap_or(l.local);
+                    let local = stream.local_addr().unwrap_or(l.local);
                     let conn = Arc::new(Conn::new(id, self.notifier.clone()));
                     self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::NONE });
-                    permit.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local }));
+                    permit.send(Ok(Connected { conn: Some(conn), peer, local }));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break None,
                 // The client went away before or during setup (the failed
@@ -376,7 +387,7 @@ impl Driver {
         // switches it to what the connection needs.
         self.conns.insert(id, Entry { stream, conn: conn.clone(), interest: Interest::WRITABLE });
         // If the caller is gone, `Connected`'s drop marks the stream dropped.
-        let _ = reply.send(Ok(Connected { conn: Some(conn), peer: peer.into(), local: local.into() }));
+        let _ = reply.send(Ok(Connected { conn: Some(conn), peer, local }));
         self.service(id);
     }
 

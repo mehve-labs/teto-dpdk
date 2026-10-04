@@ -2,13 +2,14 @@
 //!
 //! All sockets are non-blocking: operations that would block return
 //! [`io::ErrorKind::WouldBlock`]. Use [`crate::event::Kqueue`] to learn when to
-//! retry. Sockets close their F-Stack descriptor on drop. Only IPv4 is
-//! supported; IPv6 addresses are rejected with [`io::ErrorKind::InvalidInput`].
+//! retry. Sockets close their F-Stack descriptor on drop. IPv4 and IPv6 are
+//! supported (for IPv6, configure `addr6`/`prefix_len` for the port in
+//! `config.ini`); an IPv6 socket carries IPv6 traffic only.
 
 use std::io;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4};
+use std::net::{Shutdown, SocketAddr};
 
 use crate::config::TcpSocketOptions;
 use crate::runtime::{self, FStack};
@@ -45,24 +46,14 @@ impl Drop for Fd {
     }
 }
 
-pub(crate) fn require_v4(addr: SocketAddr) -> io::Result<SocketAddrV4> {
-    match addr {
-        SocketAddr::V4(a) => Ok(a),
-        SocketAddr::V6(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "IPv6 is not supported by teto-dpdk",
-        )),
-    }
+fn local_addr(fd: &Fd) -> io::Result<SocketAddr> {
+    let mut out = ffi::SockAddr::default();
+    cvt32(ffi::sock_local_addr(fd.get()?, &mut out))?;
+    Ok(out.to_std())
 }
 
-fn v4(ip: u32, port: u16) -> SocketAddrV4 {
-    SocketAddrV4::new(Ipv4Addr::from(ip), port)
-}
-
-fn local_addr(fd: &Fd) -> io::Result<SocketAddrV4> {
-    let (mut ip, mut port) = (0, 0);
-    cvt32(ffi::sock_local_addr_v4(fd.get()?, &mut ip, &mut port))?;
-    Ok(v4(ip, port))
+fn bind(fd: &Fd, addr: SocketAddr) -> io::Result<()> {
+    cvt32(ffi::sock_bind(fd.get()?, &ffi::SockAddr::from_std(addr))).map(drop)
 }
 
 fn set_opt(fd: &Fd, opt: ffi::SockOpt, value: i32) -> io::Result<()> {
@@ -104,9 +95,9 @@ fn apply_tcp_options(fd: &Fd, opts: &TcpSocketOptions) -> io::Result<()> {
     Ok(())
 }
 
-fn nonblocking_socket(create: fn() -> i32) -> io::Result<Fd> {
+fn nonblocking_socket(create: fn(bool) -> i32, v6: bool) -> io::Result<Fd> {
     runtime::ensure_alive()?;
-    let fd = Fd::new(cvt32(create())?);
+    let fd = Fd::new(cvt32(create(v6))?);
     cvt32(ffi::sock_set_nonblocking(fd.get()?))?;
     Ok(fd)
 }
@@ -123,14 +114,13 @@ impl TcpListener {
     /// connection; they are also applied to the listening socket first, so an
     /// option F-Stack rejects fails here rather than on every accept.
     pub fn bind(_fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
-        let addr = require_v4(addr)?;
-        let fd = nonblocking_socket(ffi::sock_tcp)?;
+        let fd = nonblocking_socket(ffi::sock_tcp, addr.is_ipv6())?;
         set_opt(&fd, ffi::SockOpt::ReuseAddr, 1)?;
         if opts.reuse_port == Some(true) {
             set_opt(&fd, ffi::SockOpt::ReusePort, 1)?;
         }
         apply_tcp_options(&fd, opts)?;
-        cvt32(ffi::sock_bind_v4(fd.get()?, (*addr.ip()).into(), addr.port()))?;
+        bind(&fd, addr)?;
         cvt32(ffi::sock_listen(fd.get()?, LISTEN_BACKLOG))?;
         Ok(TcpListener { fd, opts: opts.clone() })
     }
@@ -140,17 +130,17 @@ impl TcpListener {
     /// Returns [`io::ErrorKind::WouldBlock`] when none is pending. If applying
     /// the socket options to the new connection fails, the connection is
     /// closed and the error returned.
-    pub fn accept(&self) -> io::Result<(TcpStream, SocketAddrV4)> {
-        let (mut ip, mut port) = (0, 0);
-        let fd = Fd::new(cvt32(ffi::sock_accept_v4(self.fd.get()?, &mut ip, &mut port))?);
+    pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        let mut peer = ffi::SockAddr::default();
+        let fd = Fd::new(cvt32(ffi::sock_accept(self.fd.get()?, &mut peer))?);
         cvt32(ffi::sock_set_nonblocking(fd.get()?))?;
         apply_tcp_options(&fd, &self.opts)?;
-        let peer = v4(ip, port);
+        let peer = peer.to_std();
         Ok((TcpStream { fd, peer }, peer))
     }
 
     /// The local address (resolves a port-0 bind to the assigned port).
-    pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
         local_addr(&self.fd)
     }
 }
@@ -159,7 +149,7 @@ impl TcpListener {
 #[derive(Debug)]
 pub struct TcpStream {
     fd: Fd,
-    peer: SocketAddrV4,
+    peer: SocketAddr,
 }
 
 /// `EINPROGRESS` (Linux numbering, as F-Stack reports it).
@@ -170,16 +160,53 @@ impl TcpStream {
     /// progress: wait for it to become writable (kqueue `WRITABLE`), then call
     /// [`take_error`](Self::take_error) — `Ok(None)` means it connected.
     /// `opts` are applied before connecting.
-    pub fn connect(_fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
-        let addr = require_v4(addr)?;
-        let fd = nonblocking_socket(ffi::sock_tcp)?;
+    pub fn connect(fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
+        Self::start_connect(fs, None, addr, opts)
+    }
+
+    /// Like [`connect`](Self::connect), from the local address `local`
+    /// (port 0 picks a port). `local` and `addr` must be the same family.
+    pub fn connect_from(
+        fs: &FStack,
+        local: SocketAddr,
+        addr: SocketAddr,
+        opts: &TcpSocketOptions,
+    ) -> io::Result<Self> {
+        Self::start_connect(fs, Some(local), addr, opts)
+    }
+
+    fn start_connect(
+        _fs: &FStack,
+        local: Option<SocketAddr>,
+        addr: SocketAddr,
+        opts: &TcpSocketOptions,
+    ) -> io::Result<Self> {
+        if local.is_some_and(|l| l.is_ipv6() != addr.is_ipv6()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local and remote addresses must be the same family",
+            ));
+        }
+        let fd = nonblocking_socket(ffi::sock_tcp, addr.is_ipv6())?;
         apply_tcp_options(&fd, opts)?;
-        match cvt32(ffi::sock_connect_v4(fd.get()?, (*addr.ip()).into(), addr.port())) {
+        if let Some(local) = local {
+            if opts.reuse_port == Some(true) {
+                set_opt(&fd, ffi::SockOpt::ReusePort, 1)?;
+            }
+            bind(&fd, local)?;
+        }
+        match cvt32(ffi::sock_connect(fd.get()?, &ffi::SockAddr::from_std(addr))) {
             Ok(_) => {}
             Err(e) if e.raw_os_error() == Some(EINPROGRESS) => {}
             Err(e) => return Err(e),
         }
         Ok(TcpStream { fd, peer: addr })
+    }
+
+    /// Apply socket options to the connection now (`TCP_NODELAY`, keepalive,
+    /// buffer sizes, ...). Unset fields are left as they are.
+    pub fn set_options(&self, opts: &TcpSocketOptions) -> io::Result<()> {
+        apply_tcp_options(&self.fd, opts)
     }
 
     /// Take the socket's pending error (`SO_ERROR`), e.g. why a connect
@@ -236,12 +263,12 @@ impl TcpStream {
     }
 
     /// The remote address.
-    pub fn peer_addr(&self) -> SocketAddrV4 {
+    pub fn peer_addr(&self) -> SocketAddr {
         self.peer
     }
 
     /// The local address (resolves a port-0 bind to the assigned port).
-    pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
         local_addr(&self.fd)
     }
 }
@@ -253,17 +280,16 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    /// Bind a non-blocking UDP socket to `addr` (IPv4 only).
+    /// Bind a non-blocking UDP socket to `addr`.
     pub fn bind(_fs: &FStack, addr: SocketAddr) -> io::Result<Self> {
-        let addr = require_v4(addr)?;
-        let fd = nonblocking_socket(ffi::sock_udp)?;
-        cvt32(ffi::sock_bind_v4(fd.get()?, (*addr.ip()).into(), addr.port()))?;
+        let fd = nonblocking_socket(ffi::sock_udp, addr.is_ipv6())?;
+        bind(&fd, addr)?;
         Ok(UdpSocket { fd })
     }
 
     /// Receive one datagram. If it is larger than `buf`, the excess is
     /// discarded.
-    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddrV4)> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         // SAFETY: an initialised slice is a valid `MaybeUninit` slice.
         let buf = unsafe { &mut *(buf as *mut [u8] as *mut [MaybeUninit<u8>]) };
         self.recv_from_uninit(buf)
@@ -273,24 +299,21 @@ impl UdpSocket {
     pub fn recv_from_uninit(
         &self,
         buf: &mut [MaybeUninit<u8>],
-    ) -> io::Result<(usize, SocketAddrV4)> {
-        let (mut ip, mut port) = (0, 0);
+    ) -> io::Result<(usize, SocketAddr)> {
+        let mut from = ffi::SockAddr::default();
         // SAFETY: F-Stack only writes into the buffer, never reads from it.
-        let n = cvt(unsafe {
-            ffi::sock_recvfrom_v4(self.fd.get()?, buf.as_mut_ptr().cast(), buf.len(), &mut ip, &mut port)
-        })?;
-        Ok((n as usize, v4(ip, port)))
+        let n = cvt(unsafe { ffi::sock_recvfrom(self.fd.get()?, buf.as_mut_ptr().cast(), buf.len(), &mut from) })?;
+        Ok((n as usize, from.to_std()))
     }
 
     /// Send one datagram to `addr`. Returns [`io::ErrorKind::WouldBlock`] if
     /// F-Stack can't take it right now.
     pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
-        let addr = require_v4(addr)?;
-        Ok(cvt(ffi::sock_sendto_v4(self.fd.get()?, buf, (*addr.ip()).into(), addr.port()))? as usize)
+        Ok(cvt(ffi::sock_sendto(self.fd.get()?, buf, &ffi::SockAddr::from_std(addr)))? as usize)
     }
 
     /// The local address (resolves a port-0 bind to the assigned port).
-    pub fn local_addr(&self) -> io::Result<SocketAddrV4> {
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
         local_addr(&self.fd)
     }
 }
