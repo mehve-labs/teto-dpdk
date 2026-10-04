@@ -59,7 +59,8 @@ impl FStack {
         // Checked before anything touches F-Stack, so a wrong path can be
         // fixed and init retried (a failed F-Stack init can't be).
         let path = std::path::Path::new(cfg.config_file());
-        if !path.is_file() {
+        // Not `is_file()`: a FIFO such as `<(generate-config)` is fine too.
+        if !path.exists() || path.is_dir() {
             let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,

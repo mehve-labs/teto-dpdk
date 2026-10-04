@@ -1,5 +1,7 @@
 //! Many concurrent connections, then sustained connection churn with a
-//! memory check. Churn length: `TETO_SOAK_SECS` (default 15; set it to hours
+//! memory check. The RSS check catches leaks of heap memory (Rust buffers,
+//! F-Stack's sockets and PCBs, which use the host allocator); DPDK's mbuf pool
+//! is preallocated, so mbuf leaks don't show up in it. Churn length: `TETO_SOAK_SECS` (default 15; set it to hours
 //! for a soak run). See tests/tcp.rs for the environment these tests need.
 
 use std::net::SocketAddr;
@@ -24,6 +26,32 @@ fn config() -> FStackConfig {
 
 fn addr() -> SocketAddr {
     "10.0.0.1:8080".parse().unwrap()
+}
+
+/// Sets sysctls for the test and restores the previous values when dropped,
+/// so running this outside a container doesn't leave the host retuned.
+struct Sysctls(Vec<(String, String)>);
+
+impl Sysctls {
+    fn set(values: &[(&str, &str)]) -> Self {
+        let mut saved = Vec::new();
+        for (key, value) in values {
+            let old = std::process::Command::new("sysctl").args(["-n", key]).output().expect("sysctl");
+            let old = String::from_utf8_lossy(&old.stdout).trim().to_owned();
+            let out = std::process::Command::new("sysctl").args(["-w", &format!("{key}={value}")]).output();
+            assert!(out.is_ok_and(|o| o.status.success()), "sysctl {key} failed (needs root)");
+            saved.push((key.to_string(), old));
+        }
+        Sysctls(saved)
+    }
+}
+
+impl Drop for Sysctls {
+    fn drop(&mut self) {
+        for (key, old) in &self.0 {
+            let _ = std::process::Command::new("sysctl").args(["-w", &format!("{key}={old}")]).output();
+        }
+    }
 }
 
 /// Resident set size of this process, in KiB.
@@ -52,12 +80,8 @@ fn scale_suite() {
     rt.block_on(async {
         // Load-generator tuning for the kernel-side client: it closes first,
         // so every connection leaves a TIME_WAIT on its side, and at churn
-        // rates the default port range runs out. These sysctls are per
-        // network namespace (i.e. per container).
-        for (key, value) in [("net.ipv4.ip_local_port_range", "1024 65535"), ("net.ipv4.tcp_tw_reuse", "1")] {
-            let out = std::process::Command::new("sysctl").args(["-w", &format!("{key}={value}")]).output();
-            assert!(out.is_ok_and(|o| o.status.success()), "sysctl {key} failed (needs root)");
-        }
+        // rates the default port range runs out. Restored afterwards.
+        let _tuning = Sysctls::set(&[("net.ipv4.ip_local_port_range", "1024 65535"), ("net.ipv4.tcp_tw_reuse", "1")]);
         let rt = TetoRuntime::start(config()).await.expect("start");
         let mut listener =
             TetoTcpListener::bind(&rt, addr(), TcpSocketOptions::default().nodelay(true)).await.expect("bind");
@@ -81,7 +105,7 @@ fn scale_suite() {
 
         // Wait for the TAP device.
         let deadline = Instant::now() + Duration::from_secs(90);
-        while KernelTcpStream::connect(addr()).await.is_err() {
+        while !matches!(timeout(Duration::from_secs(2), KernelTcpStream::connect(addr())).await, Ok(Ok(_))) {
             assert!(Instant::now() < deadline, "F-Stack never became reachable");
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -117,6 +141,9 @@ fn scale_suite() {
         for i in 0..200 {
             exchange(format!("warm-{i}").into_bytes()).await;
         }
+        // The server counts a connection after its shutdown completes, which
+        // can be just after the client saw EOF: let warm-up counts settle.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let rss_before = rss_kib();
         let served_before = served.load(std::sync::atomic::Ordering::Relaxed);
         let end = Instant::now() + soak;

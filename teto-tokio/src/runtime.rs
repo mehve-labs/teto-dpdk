@@ -76,9 +76,11 @@ impl std::fmt::Debug for TetoRuntime {
 impl TetoRuntime {
     /// Initialise F-Stack on a new thread and start its poll loop.
     ///
-    /// F-Stack can be initialised once per process: a second call (or a call
-    /// after a failed one) returns [`io::ErrorKind::AlreadyExists`]. That
-    /// includes cancelling this future after initialisation has started.
+    /// F-Stack can be initialised once per process: a second call returns
+    /// [`io::ErrorKind::AlreadyExists`], as does any call after F-Stack itself
+    /// failed to initialise or after this future was cancelled once
+    /// initialisation had started. (A missing config file is reported before
+    /// F-Stack is touched, so that one can be fixed and retried.)
     pub async fn start(cfg: FStackConfig) -> io::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel::<io::Result<&'static str>>();

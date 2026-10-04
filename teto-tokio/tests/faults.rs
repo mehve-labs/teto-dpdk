@@ -42,7 +42,16 @@ fn tc(args: &[&str]) {
 }
 
 /// Impairments on dtap0, removed when dropped (also if a test panics).
+///
+/// DPDK's TAP driver owns dtap0's qdiscs (a `multiq` root with class `1:1`
+/// and an `ingress` qdisc), so the impairments are added *inside* that
+/// layout: netem as the child qdisc of class `1:1` (healed by swapping in a
+/// plain `pfifo`; a class left without a child would drop everything), and
+/// one drop filter at a fixed priority in the ingress qdisc.
 struct Faults;
+
+const NETEM_PARENT: &str = "1:1";
+const FILTER_PREF: &str = "7";
 
 impl Faults {
     fn new() -> Self {
@@ -51,25 +60,30 @@ impl Faults {
     }
 
     fn clear() {
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "root"]).output();
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "ingress"]).output();
+        // Replace rather than delete: a multiq class left without a child
+        // qdisc drops everything.
+        let _ = Command::new("tc")
+            .args(["qdisc", "replace", "dev", DEV, "parent", NETEM_PARENT, "pfifo"])
+            .output();
+        let _ = Command::new("tc").args(["filter", "del", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]).output();
     }
 
     /// Impair kernel -> F-Stack packets (`netem` options, e.g. `loss 3%`).
     fn to_fstack(&self, netem: &str) {
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "root"]).output();
-        let mut args = vec!["qdisc", "add", "dev", DEV, "root", "netem"];
+        let mut args = vec!["qdisc", "replace", "dev", DEV, "parent", NETEM_PARENT, "netem"];
         args.extend(netem.split_whitespace());
         tc(&args);
     }
 
     /// Drop one in `one_in` F-Stack -> kernel packets (`1` drops everything).
     fn drop_from_fstack(&self, one_in: u32) {
-        let _ = Command::new("tc").args(["qdisc", "del", "dev", DEV, "ingress"]).output();
-        tc(&["qdisc", "add", "dev", DEV, "ingress"]);
+        let _ = Command::new("tc").args(["filter", "del", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]).output();
+        // The TAP driver normally created the ingress qdisc already.
+        let _ = Command::new("tc").args(["qdisc", "add", "dev", DEV, "ingress"]).output();
         let one_in = one_in.to_string();
         let mut args = vec![
-            "filter", "add", "dev", DEV, "parent", "ffff:", "protocol", "ip", "u32", "match", "u32", "0", "0",
+            "filter", "add", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF, "protocol", "ip", "u32", "match",
+            "u32", "0", "0",
         ];
         if one_in == "1" {
             args.extend(["action", "drop"]);
@@ -86,18 +100,21 @@ impl Faults {
     /// Packets dropped so far by (netem on kernel -> F-Stack, filter on
     /// F-Stack -> kernel), to prove the impairments took effect.
     fn dropped(&self) -> (u64, u64) {
-        let stat = |args: &[&str]| {
-            let out = Command::new("tc").args(args).output().unwrap();
-            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let sum_dropped = |text: &str| -> u64 {
             text.split("dropped ")
                 .skip(1)
                 .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()?.parse::<u64>().ok())
-                .sum::<u64>()
+                .sum()
         };
-        (
-            stat(&["-s", "qdisc", "show", "dev", DEV, "root"]),
-            stat(&["-s", "filter", "show", "dev", DEV, "parent", "ffff:"]),
-        )
+        let run = |args: &[&str]| String::from_utf8_lossy(&Command::new("tc").args(args).output().unwrap().stdout).into_owned();
+        // Only the netem qdisc's own statistics block.
+        let qdiscs = run(&["-s", "qdisc", "show", "dev", DEV]);
+        let netem = qdiscs
+            .split("qdisc ")
+            .find(|block| block.starts_with("netem"))
+            .map_or(0, sum_dropped);
+        let filter = sum_dropped(&run(&["-s", "filter", "show", "dev", DEV, "parent", "ffff:", "pref", FILTER_PREF]));
+        (netem, filter)
     }
 }
 
@@ -217,61 +234,87 @@ async fn lossy_link(listener: &mut TetoTcpListener) {
     );
 }
 
-/// F-Stack's packets are black-holed for 3 s mid-transfer: its
-/// retransmission timer must recover the connection.
+/// F-Stack's packets are black-holed for 3 s in the middle of a transfer.
+/// Nothing F-Stack sends gets through, so no ACKs come back either: only
+/// F-Stack's own retransmission timer can restart the transfer.
 async fn outage_from_fstack(listener: &mut TetoTcpListener) {
+    const LEN: usize = 4 * 1024 * 1024;
     let faults = Faults::new();
-    let len = 2 * 1024 * 1024;
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = tokio::task::spawn_blocking(move || {
         let mut s = connect_kernel();
         s.write_all(b"SEND").unwrap();
-        read_all(&mut s)
+        // Receive the first part, then hold off while the outage starts.
+        let mut first = vec![0u8; 256 * 1024];
+        let mut got = 0;
+        while got < first.len() {
+            match s.read(&mut first[got..]) {
+                Ok(0) => panic!("EOF before the outage"),
+                Ok(n) => got += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        go_rx.recv().unwrap();
+        first.extend(read_all(&mut s));
+        first
     });
     let mut server = accept(listener).await;
     let mut cmd = [0u8; 4];
     server.read_exact(&mut cmd).await.unwrap();
     let writer = tokio::spawn(async move {
-        server.write_all(&pattern(len, 7)).await.unwrap();
+        server.write_all(&pattern(LEN, 7)).await.unwrap();
         server.shutdown().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Let the transfer start, then cut F-Stack off before the client reads on.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     faults.drop_from_fstack(1);
+    go_tx.send(()).unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
+    let (_, dropped) = faults.dropped();
     faults.heal();
+    assert!(dropped > 0, "the outage dropped nothing: the transfer wasn't in flight");
     let healed = Instant::now();
     let got = timeout(Duration::from_secs(60), client).await.expect("no recovery after outage").unwrap();
     timeout(Duration::from_secs(10), writer).await.unwrap().unwrap();
-    assert_eq!(got.len(), len);
-    assert!(got == pattern(len, 7), "data corrupted");
-    eprintln!("outage_from_fstack: recovered {:?} after the outage ended", healed.elapsed());
+    assert_eq!(got.len(), LEN);
+    assert!(got == pattern(LEN, 7), "data corrupted");
+    eprintln!("outage_from_fstack: {dropped} packets dropped; transfer completed {:?} after the outage", healed.elapsed());
 }
 
-/// The kernel's packets to F-Stack are lost for 3 s mid-upload.
+/// The kernel's packets to F-Stack are lost for 3 s in the middle of an
+/// upload (recovery here is the kernel's retransmission; F-Stack must
+/// handle the retransmitted segments and keep its window consistent).
 async fn outage_to_fstack(listener: &mut TetoTcpListener) {
+    const LEN: usize = 4 * 1024 * 1024;
     let faults = Faults::new();
-    let len = 2 * 1024 * 1024;
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = tokio::task::spawn_blocking(move || {
         let mut s = connect_kernel();
-        s.write_all(&pattern(len, 11)).unwrap();
+        go_rx.recv().unwrap(); // the outage is in place
+        s.write_all(&pattern(LEN, 11)).unwrap();
         s.shutdown(Shutdown::Write).unwrap();
         read_all(&mut s)
     });
     let mut server = accept(listener).await;
+    faults.to_fstack("loss 100%");
+    go_tx.send(()).unwrap();
     let reader = tokio::spawn(async move {
-        let mut v = Vec::with_capacity(len);
+        let mut v = Vec::with_capacity(LEN);
         server.read_to_end(&mut v).await.unwrap();
         server.write_all(b"done").await.unwrap();
         server.shutdown().await.unwrap();
         v
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    faults.to_fstack("loss 100%");
     tokio::time::sleep(Duration::from_secs(3)).await;
+    let (dropped, _) = faults.dropped();
     faults.heal();
+    assert!(dropped > 0, "the outage dropped nothing: the upload wasn't in flight");
     let got = timeout(Duration::from_secs(60), reader).await.expect("no recovery after outage").unwrap();
-    assert_eq!(got.len(), len);
-    assert!(got == pattern(len, 11), "data corrupted");
+    assert_eq!(got.len(), LEN);
+    assert!(got == pattern(LEN, 11), "data corrupted");
     assert_eq!(timeout(Duration::from_secs(10), client).await.unwrap().unwrap(), b"done");
+    eprintln!("outage_to_fstack: {dropped} packets dropped");
 }
 
 /// A peer that disappears without FIN or RST is detected by TCP keepalive
@@ -296,7 +339,10 @@ async fn silent_peer_detected_by_keepalive(rt: &TetoRuntime) {
         .expect("keepalive never declared the peer dead")
         .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::TimedOut, "{err:?}");
-    eprintln!("silent peer detected after {:?}", started.elapsed());
+    // idle 1 s + 3 probes 1 s apart: anything far outside that isn't keepalive.
+    let took = started.elapsed();
+    assert!((Duration::from_secs(2)..Duration::from_secs(10)).contains(&took), "detected after {took:?}");
+    eprintln!("silent peer detected after {took:?}");
     faults.heal();
     drop(client);
 }

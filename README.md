@@ -239,7 +239,7 @@ No performance numbers are published yet. `scripts/bench.sh` runs the same echo 
 
 The shipped `config.ini` sets `pkt_tx_delay=0`, so F-Stack transmits immediately instead of batching for up to 100 µs (its own default). In the Docker setup that took echo p50 RTT from 200 µs to 36 µs, with no measurable throughput change. On a real NIC at high packet rates, batching may matter for bulk throughput, so raise it toward 100 for throughput-bound workloads.
 
-The data path copies each payload once between F-Stack and the per-connection buffer, and once between that buffer and your buffer (the same count as a kernel socket read). There are no per-message allocations on the TCP path. UDP datagrams are carved out of 1 MiB blocks.
+The tokio adapter copies each payload twice in each direction (between F-Stack and a per-connection buffer, and between that buffer and yours). That is one copy more than a kernel socket, the price of handing data between threads; the low-level API reads and writes F-Stack directly. There are no per-message allocations on the TCP path, and UDP datagrams are carved out of 1 MiB blocks.
 
 ## Documentation
 

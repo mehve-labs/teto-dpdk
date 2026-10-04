@@ -2,7 +2,8 @@ use std::io;
 
 /// Config file used by the [`FStackConfig::for_docker`] and
 /// [`FStackConfig::for_bare_metal`] profiles: `$TETO_CONFIG` if set,
-/// otherwise `config.ini` in the working directory.
+/// otherwise `config.ini` in the working directory. The variable is read
+/// when the profile is built, not when F-Stack is initialised.
 pub const CONFIG_ENV: &str = "TETO_CONFIG";
 
 /// Selects the profile used by [`FStackConfig::from_env`].
@@ -122,10 +123,15 @@ impl FStackConfig {
     /// with the config file from `$TETO_CONFIG` (default `config.ini`). Used
     /// by the examples so they run unchanged in either environment.
     pub fn from_env() -> io::Result<Self> {
-        match std::env::var(PROFILE_ENV).as_deref() {
-            Err(_) | Ok("docker") => Ok(Self::for_docker()),
-            Ok("bare-metal") => Ok(Self::for_bare_metal()),
-            Ok(other) => Err(io::Error::new(
+        let profile = match std::env::var(PROFILE_ENV) {
+            Ok(p) => p.to_ascii_lowercase(),
+            Err(std::env::VarError::NotPresent) => "docker".into(),
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{PROFILE_ENV}: {e}"))),
+        };
+        match profile.as_str() {
+            "docker" => Ok(Self::for_docker()),
+            "bare-metal" => Ok(Self::for_bare_metal()),
+            other => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{PROFILE_ENV}={other:?}: expected \"docker\" or \"bare-metal\""),
             )),

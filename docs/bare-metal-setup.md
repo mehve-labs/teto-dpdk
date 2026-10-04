@@ -33,8 +33,10 @@ ninja -C build && ninja -C build install && ldconfig
 
 # Build F-Stack
 cd /opt/f-stack/lib
-FF_DPDK=/usr/local FF_PATH=/opt/f-stack make -j$(nproc)
+FF_DPDK=/usr/local FF_PATH=/opt/f-stack make -j$(nproc) CC="cc -Wno-error=array-bounds"
 ```
+
+(`-Wno-error=array-bounds` works around a GCC 12+ false positive in F-Stack's FreeBSD sources.)
 
 If F-Stack lives somewhere other than `/opt/f-stack`, set `FF_PATH` to its source tree when building teto (`FF_PATH=/path/to/f-stack cargo build`). If DPDK isn't installed under a standard prefix, point `PKG_CONFIG_PATH` at the directory containing `libdpdk.pc`.
 
@@ -214,11 +216,12 @@ Don't run `entrypoint.sh` on bare metal: there's no TAP device to configure.
 
 ## 7. Run
 
-F-Stack needs root (or the capabilities for VFIO and hugepages):
+Build as your normal user, then run the binary as root (F-Stack needs VFIO and hugepages). Running `cargo` itself under `sudo` would use root's toolchain and environment and leave a root-owned `target/`:
 
 ```bash
+cargo build --release -p teto-tokio --example tcp_echo_async
 sudo TETO_PROFILE=bare-metal TETO_CONFIG=$PWD/config.ini \
-    $(which cargo) run --release -p teto-tokio --example tcp_echo_async
+    ./target/release/examples/tcp_echo_async
 ```
 
 Send test traffic from another machine on the same network:

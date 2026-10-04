@@ -14,7 +14,8 @@ the driver or the build script.
                 UdpSocket} · event::Kqueue          (safe, !Send, non-blocking)
                 src/sys.rs: cxx bridge
  ─────────────────────────────────────────────────────────────────────────
-   cxx_layer/   thin C++ shim: ff_* calls, returns -errno, no state, no callbacks
+   cxx_layer/   thin C++ shim over ff_* calls: socket calls return -errno, init
+                throws (→ Err), one trampoline calls Rust each loop iteration
  ─────────────────────────────────────────────────────────────────────────
    F-Stack      FreeBSD TCP/IP stack in user space (libfstack.a)
    DPDK         poll-mode NIC drivers (or the TAP PMD in Docker)
@@ -77,9 +78,11 @@ and the shim translates it.
  TetoTcpStream ──┼─▶  rx buffer ◀── read ─────────────┤   poll-loop iteration:
  ...             │    tx buffer ─── write ───────────▶│    1. run commands
                  │    flags, error, wakers            │    2. service notified conns
-                 └─▶ Notifier (ids needing service) ─▶│    3. listeners / connects / UDP
- TetoRuntime ─────▶ command channel ─────────────────▶│    4. kqueue poll → events
-   (bind, listen, connect)                            │    5. deadlines, stop check
+                 └─▶ Notifier (ids needing service) ─▶│    3. housekeeping: closed listeners,
+ TetoRuntime ─────▶ command channel ─────────────────▶│       cancelled connects, UDP sends
+   (bind, listen, connect)                            │    4. kqueue poll → events: accept,
+                                                      │       read/write, connect done, UDP rx
+                                                      │    5. drain deadlines, stop check
 ```
 
 - **Commands** (`ListenTcp`, `BindUdp`, `Connect`) carry a oneshot reply. A
@@ -101,13 +104,16 @@ and the shim translates it.
 |---|---|---|
 | per-connection receive (`rx`) | 256 KiB (`RX_HIGH`) | driver stops reading the socket (read interest removed); TCP flow control slows the peer; resumes below 128 KiB (`RX_LOW`) |
 | per-connection send (`tx`) | 256 KiB (`TX_LIMIT`) | `poll_write` returns `Pending` until the driver has handed bytes to F-Stack |
-| accept queue | 1024 per listener | listener stops accepting; clients wait in F-Stack's backlog |
+| accept queue | 1024 per listener | listener stops accepting until the queue is empty again; clients wait in F-Stack's backlog (an accept error also pauses it, after being reported once) |
 | UDP receive / send queues | 1024 datagrams each | stop reading (F-Stack's socket buffer drops on overflow) / `send_to` waits |
 
-Payloads are copied once from F-Stack into `rx` (read straight into spare
-`BytesMut` capacity) and once into your buffer, the same as a kernel socket
-read. Writes are copied into `tx` and from there into F-Stack's mbufs. UDP
-datagrams are carved out of 1 MiB blocks without per-datagram allocation.
+Payloads are copied twice in each direction: received data from F-Stack's
+mbufs into `rx` (read straight into spare `BytesMut` capacity), then from
+`rx` into your buffer; written data into `tx`, then from `tx` into F-Stack's
+mbufs. That is one copy more than a kernel socket (which copies once between
+its buffers and yours), the price of handing data between threads. There are
+no per-message allocations on the TCP path; UDP datagrams are carved out of
+1 MiB blocks.
 
 `flush` completes when `tx` is empty, i.e. F-Stack has accepted the bytes.
 That's like a kernel socket's flush, except that it can wait on a peer that
@@ -119,12 +125,17 @@ stops reading.
 accept/connect ──▶ open ──peer FIN──▶ read EOF (Ok(0)); writing still allowed
                     │
                     ├─ shutdown() ──▶ flush tx, send FIN; reading still allowed
-                    ├─ error (RST, timeout) ──▶ reads/writes return the error
+                    │                 (Ok if the FIN was already sent)
+                    ├─ error (RST, timeout) ──▶ reads return data already
+                    │                            buffered, then the error;
+                    │                            writes return the error
                     └─ drop ──▶ draining:
-                                  1. hand remaining tx to F-Stack
-                                  2. FIN, discard further input
-                                  3. close when the peer has ACKed everything
-                                     (kqueue EVFILT_EMPTY)
+                                  1. discard unread input; hand remaining tx
+                                     to F-Stack
+                                  2. FIN; keep discarding input
+                                  3. close as soon as the peer has ACKed
+                                     everything (immediately if it already
+                                     has; otherwise on kqueue EVFILT_EMPTY)
                                   4. after 30 s: abort (RST) instead
 ```
 
@@ -164,6 +175,8 @@ targets, and downstream applications would fail to link; CI builds
   otherwise drop them. Defining the symbols keeps the sections alive with any
   linker, without `-z nostart-stop-gc`, which a library can't pass to its
   dependents.
+- The pre-linked object is re-archived as `libfstack_teto.a` in the build's
+  `OUT_DIR`. Building needs GNU binutils (`ld`, `readelf`, `ar`), i.e. Linux.
 - `FF_PATH` selects the F-Stack tree (default `/opt/f-stack`).
 
 ## Known limits
@@ -179,8 +192,8 @@ targets, and downstream applications would fail to link; CI builds
   thread would avoid it while keeping async/await.
 - **IPv4 only.** IPv6 addresses are rejected explicitly.
 - **F-Stack version.** Pinned to v1.25. F-Stack master (as of July 2026) runs no
-  FreeBSD kernel timers, which breaks retransmission. `tests/faults.rs` fails
-  on it, so run that suite when upgrading.
+  FreeBSD kernel timers, which breaks retransmission.
+  `teto-tokio/tests/faults.rs` fails on it, so run that suite when upgrading.
 
 ## Testing
 
