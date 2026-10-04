@@ -25,7 +25,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   # Builds DPDK + F-Stack in the project image and runs the integration suite
-  # against F-Stack on a TAP device.
+  # against F-Stack on a veth pair.
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 90

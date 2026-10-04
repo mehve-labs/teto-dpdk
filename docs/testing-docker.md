@@ -129,5 +129,7 @@ ip -s link show teto0               # TX = sent to F-Stack, RX = from F-Stack
   (`net.link.arp.maxhold`); the rest are dropped.
 
 **Faults left behind.** The fault tests remove their `tc` rules when they
-finish, even if they fail. To clear by hand:
+finish or fail, and every test clears leftovers when it starts. A test killed
+outright (e.g. by a timeout) can still leave rules on `teto0` in a long-running
+dev container until the next test runs. To clear by hand:
 `tc qdisc del dev teto0 root; tc qdisc del dev teto0 ingress`.

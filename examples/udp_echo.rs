@@ -11,7 +11,7 @@ use teto_dpdk::net::UdpSocket;
 use teto_dpdk::{FStack, FStackConfig};
 
 fn main() -> io::Result<()> {
-    // TETO_PROFILE=bare-metal for a real NIC (default: Docker/TAP).
+    // TETO_PROFILE=bare-metal for a real NIC (default: Docker).
     let fs = FStack::init(&FStackConfig::from_env()?)?;
     let socket = UdpSocket::bind(&fs, "0.0.0.0:8080".parse().unwrap())?;
     println!("Bound to {}", socket.local_addr()?);

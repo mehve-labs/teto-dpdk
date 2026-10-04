@@ -34,8 +34,17 @@ pub fn fstack(port: u16) -> SocketAddr {
     SocketAddr::from(([10, 0, 0, 1], port))
 }
 
+/// Remove `tc` impairments a killed fault test may have left on teto0 (it
+/// outlives test processes).
+pub fn clear_link_faults() {
+    for args in [["qdisc", "del", "dev", "teto0", "root"], ["qdisc", "del", "dev", "teto0", "ingress"]] {
+        let _ = std::process::Command::new("tc").args(args).output();
+    }
+}
+
 /// Start the runtime, explaining the one-per-process rule if it's broken.
 pub async fn start() -> TetoRuntime {
+    clear_link_faults();
     match TetoRuntime::start(config()).await {
         Ok(rt) => rt,
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -48,7 +57,8 @@ pub async fn start() -> TetoRuntime {
 /// Start the runtime and listen on 10.0.0.1:`port`.
 pub async fn listen(port: u16) -> TetoTcpListener {
     let rt = start().await;
-    TetoTcpListener::bind(&rt, fstack(port), TcpSocketOptions::default().nodelay(true)).await.expect("bind")
+    let opts = TcpSocketOptions::default().nodelay(true).keepalive(true);
+    TetoTcpListener::bind(&rt, fstack(port), opts).await.expect("bind")
 }
 
 /// Deterministic test payload.

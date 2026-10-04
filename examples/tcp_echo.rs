@@ -61,7 +61,7 @@ fn on_ready(conn: &mut Conn, buf: &mut [u8]) -> io::Result<bool> {
 }
 
 fn main() -> io::Result<()> {
-    // TETO_PROFILE=bare-metal for a real NIC (default: Docker/TAP).
+    // TETO_PROFILE=bare-metal for a real NIC (default: Docker).
     let fs = FStack::init(&FStackConfig::from_env()?)?;
     let opts = TcpSocketOptions::default().nodelay(true);
     let listener = TcpListener::bind(&fs, "0.0.0.0:8080".parse().unwrap(), &opts)?;

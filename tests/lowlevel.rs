@@ -75,6 +75,9 @@ fn tcp_echo_with_kqueue() {
     let clients = spawn_tcp_clients();
     run_until_done(&fs, &clients, || tcp.tick());
     clients.join().expect("tcp clients");
+    // After a loop that carried real traffic, shutdown is still clean.
+    assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::BrokenPipe);
+    drop(tcp); // closes nothing: F-Stack is gone
 }
 
 /// Bursts of datagrams are drained in one go.
@@ -158,8 +161,8 @@ impl<'a> TcpEcho<'a> {
 fn spawn_tcp_clients() -> std::thread::JoinHandle<()> {
     const CLIENTS: usize = 50;
     std::thread::spawn(move || {
-        // Wait for the TAP device to be configured.
-        let deadline = Instant::now() + Duration::from_secs(90);
+        // Wait for F-Stack to come up.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while StdTcpStream::connect_timeout(&sa("10.0.0.1:8080"), Duration::from_secs(1)).is_err() {
             assert!(Instant::now() < deadline, "F-Stack never became reachable");
             std::thread::sleep(Duration::from_millis(500));
@@ -212,11 +215,10 @@ fn spawn_udp_client() -> std::thread::JoinHandle<()> {
         let mut buf = [0u8; 64];
         let mut received = 0;
         let deadline = Instant::now() + Duration::from_secs(120);
-        // Send in bursts until N echoes arrive (the first bursts may be lost
-        // while the TAP device is still being configured).
+        // Send in bursts until N echoes arrive (the first may be lost while
+        // F-Stack starts up and resolves ARP).
         while received < N && Instant::now() < deadline {
             for i in 0..50 {
-                // Fails with ENETUNREACH until the TAP device is configured.
                 let _ = c.send_to(format!("d{i}").as_bytes(), "10.0.0.1:9000");
             }
             if received == 0 {

@@ -4,3 +4,8 @@
 [profile.default]
 test-threads = 1
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The churn test runs for $TETO_SOAK_SECS (default 15 s); allow day-long soaks.
+[[profile.default.overrides]]
+filter = 'test(churn_keeps_memory_flat)'
+slow-timeout = { period = "60s", terminate-after = 1440 }

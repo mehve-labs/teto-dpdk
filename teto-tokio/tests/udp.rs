@@ -70,6 +70,9 @@ async fn bursts_are_echoed() {
             while seen.len() < N {
                 let Ok((n, _)) = reader.recv_from(&mut buf) else { break };
                 let s = std::str::from_utf8(&buf[..n]).unwrap();
+                if !s.starts_with("dgram-") {
+                    continue; // late echo of a warm-up ping
+                }
                 let i: usize = s[6..10].parse().unwrap();
                 assert_eq!(s, format!("dgram-{i:04}-{}", "x".repeat(i % 900)));
                 seen.insert(i);

@@ -230,7 +230,7 @@ Passed to FreeBSD's sysctl interface after the kernel starts. Any valid FreeBSD 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `net.inet.udp.checksum` | `1` | Validate UDP checksums on RX. Leave at `1`; the Docker veth setup sends complete checksums. |
+| `net.inet.udp.checksum` | `1` | Compute checksums on outgoing UDP. Leave at `1`. (Received UDP checksums are verified whenever the sender set one.) |
 | `net.inet.udp.blackhole` | `1` | Silently drop UDP packets to closed ports (no ICMP unreachable). |
 | `net.inet.ip.redirect` | `0` | Send ICMP redirects. |
 | `net.inet.ip.forwarding` | `0` | Act as an IP router. |

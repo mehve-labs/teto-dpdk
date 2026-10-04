@@ -22,6 +22,10 @@ pub fn sa(s: &str) -> SocketAddr {
 
 /// Initialise F-Stack, explaining the one-per-process rule if it's broken.
 pub fn init() -> FStack {
+    // Remove tc impairments a killed fault test may have left on teto0.
+    for args in [["qdisc", "del", "dev", "teto0", "root"], ["qdisc", "del", "dev", "teto0", "ingress"]] {
+        let _ = std::process::Command::new("tc").args(args).output();
+    }
     match FStack::init(&config()) {
         Ok(fs) => fs,
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {

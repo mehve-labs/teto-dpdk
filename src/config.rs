@@ -20,7 +20,7 @@ fn default_config_file() -> String {
 ///
 /// # Examples
 ///
-/// Docker / TAP development:
+/// Docker development (veth pair created by `entrypoint.sh`):
 /// ```rust
 /// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::for_docker();

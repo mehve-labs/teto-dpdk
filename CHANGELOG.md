@@ -18,6 +18,11 @@ abort and soundness bugs in 0.2.0. **Breaking.**
 - `TcpSocketOptions::quickack` and `TcpSocketOptions::to_ffi` are removed
   (FreeBSD has no `TCP_QUICKACK`; use `net.inet.tcp.delayed_ack=0` in `config.ini`).
 - IPv6 addresses are rejected with `InvalidInput` instead of silently binding `0.0.0.0`.
+- `FStackConfig::for_docker()` targets the project's Docker setup, which is now a
+  veth pair created by `entrypoint.sh`
+  (`--vdev=net_af_packet0,iface=teto0-dpdk`) instead of a DPDK TAP device.
+  For a TAP-based setup, build the config with `FStackConfig::new(..)` and your
+  own `--vdev` argument.
 
 ### Added
 - `TetoRuntime`: any number of listeners, UDP sockets and connections on one
@@ -47,7 +52,12 @@ abort and soundness bugs in 0.2.0. **Breaking.**
 ### Changed
 - The Docker image pins F-Stack v1.25 (master as of mid-2026 runs no FreeBSD
   kernel timers, so TCP retransmission doesn't work) and Rust 1.99.0.
-- The shipped `config.ini` sets `pkt_tx_delay=0` (send immediately; lower latency).
+- The shipped `config.ini` sets `pkt_tx_delay=0` (send immediately; lower latency)
+  and drops the TAP-era `tx_csum_offoad_skip=1` / `net.inet.udp.checksum=0`.
+- Docker: a veth pair set up once at container start replaces the TAP device
+  and its per-run reconfiguration; containers need only `NET_ADMIN` (no
+  `--privileged`). `scripts/test.sh` runs the whole suite; integration tests
+  run under cargo-nextest, one process per test.
 
 ## 0.2.0 — 2026-08-01
 - Relicensed to Apache-2.0.

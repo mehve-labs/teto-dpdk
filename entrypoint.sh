@@ -17,10 +17,12 @@ if ! ip link show "$KERNEL_IF" > /dev/null 2>&1; then
     ip addr add 10.0.0.2/24 dev "$KERNEL_IF"
     # Fill in checksums in the kernel: veth otherwise hands over packets with
     # checksums left for "hardware" to complete, which F-Stack drops as corrupt.
-    ethtool -K "$KERNEL_IF" tx off > /dev/null
-    # Keep IPv6 router solicitations etc. off the DPDK side (best effort; may
-    # be read-only in unprivileged containers).
-    sysctl -qw "net.ipv6.conf.$DPDK_IF.disable_ipv6=1" 2> /dev/null || true
+    # (TSO goes off with it; spelled out so frames always fit the MTU.)
+    ethtool -K "$KERNEL_IF" tx off tso off > /dev/null
+    # No IPv6 link-local addresses, so neither end sends router solicitations,
+    # MLD or DAD packets at F-Stack (works without privileges, unlike sysctls).
+    ip link set "$KERNEL_IF" addrgenmode none
+    ip link set "$DPDK_IF" addrgenmode none
     ip link set "$DPDK_IF" up
     ip link set "$KERNEL_IF" up
 fi

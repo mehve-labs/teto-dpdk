@@ -200,16 +200,24 @@ async fn cancelled_connect_leaves_runtime_usable() {
     assert_eq!(&pong, b"ping");
 }
 
-/// Once every handle and socket is gone, the F-Stack thread exits.
+/// Once every handle and socket is gone, the F-Stack thread exits; any one
+/// of them (here a runtime clone, then an open connection) keeps it alive.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_exits_when_unused() {
     let rt = start().await;
     let listener = TetoTcpListener::bind(&rt, fstack(8080), opts()).await.expect("bind");
     let udp = TetoUdpSocket::bind(&rt, fstack(9000)).await.expect("bind udp");
+    let mut stream = timeout(T, TetoTcpStream::connect(&rt, kernel_echo_server(), opts())).await.unwrap().unwrap();
     let clone: TetoRuntime = rt.clone();
     drop((rt, listener, udp));
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fstack_thread_running(), "stopped while a runtime handle was alive");
     drop(clone);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fstack_thread_running(), "stopped while a connection was open");
+    stream.write_all(b"ping").await.unwrap();
+    let mut pong = [0u8; 4];
+    timeout(T, stream.read_exact(&mut pong)).await.unwrap().unwrap();
+    drop(stream);
     wait_for_fstack_exit().await;
 }
