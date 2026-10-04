@@ -11,8 +11,9 @@
 
 | Type | Description |
 |------|-------------|
+| `TetoRuntime` | Starts the F-Stack thread; everything else is created from it. |
 | `TetoTcpListener` | Accept incoming TCP connections. |
-| `TetoTcpStream` | Bidirectional TCP stream implementing `AsyncRead + AsyncWrite`. |
+| `TetoTcpStream` | Bidirectional TCP stream implementing `AsyncRead + AsyncWrite`; accepted, or opened with `connect`. |
 | `TetoUdpSocket` | Send and receive UDP datagrams. |
 
 All I/O runs on `teto-dpdk`'s dedicated F-Stack/DPDK poll-mode thread, bypassing the Linux kernel network stack entirely.
@@ -26,5 +27,7 @@ Like `teto-dpdk`, this crate links against F-Stack and DPDK and is intended to r
 Licensed under the [Apache License 2.0](LICENSE) — free for everyone, any purpose (including proprietary and closed-source use), subject only to the attribution and notice terms of the license. See [NOTICE](NOTICE) for third-party attributions.
 
 **Note for downstream:** teto-tokio is licensed permissively, but it builds on `teto-dpdk`, which statically links F-Stack/DPDK and related components, some of which are BSD- or GPL-2.0-licensed (see [NOTICE](NOTICE)). If you distribute a **compiled binary** that statically links these, that binary's redistribution terms are governed by those components' licenses — not by teto-tokio's Apache-2.0 license. Using teto-tokio as a source dependency imposes no such obligation on you.
+
+Versions 0.1.0–0.1.2 were released under AGPL-3.0-only; 0.2.0 and later are Apache-2.0 (see the repository README's licensing history).
 
 Unless you explicitly state otherwise, any contribution you submit for inclusion in teto-tokio shall be licensed under the Apache License 2.0, without any additional terms or conditions. See the repository's [CONTRIBUTING.md](https://github.com/mehve-labs/teto-dpdk/blob/master/CONTRIBUTING.md).

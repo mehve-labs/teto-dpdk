@@ -21,26 +21,27 @@ RUN apt-get update && apt-get install -y \
     pciutils \
     iproute2 \
     iputils-ping \
-    net-tools \
     netcat \
     sudo \
     tcpdump \
     ethtool \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 WORKDIR /opt
 
-# Clone F-Stack and its bundled DPDK submodule
-# F-Stack has custom patches to DPDK so it's required to use their submodule.
-# Master (not the 1.21.6 LTS tag): the DPDK bundled with 1.21.6 has a net_tap
-# RX checksum bug that flags every valid TCP packet PKT_RX_L4_CKSUM_BAD, which
-# F-Stack silently drops — UDP echoes work but TCP SYNs vanish. Master bundles
-# a DPDK with the upstream fix. If pinning to a release, verify TCP over TAP.
-RUN git clone --recurse-submodules --depth 1 https://github.com/F-Stack/f-stack.git
+# Clone F-Stack and its bundled DPDK (F-Stack carries patches to DPDK, so use
+# the bundled copy). Pinned to the v1.25 release (DPDK 23.11.5), verified by
+# commit so a moved tag can't change the build. Don't track master: as of
+# 956c4158 (Jul 2026) its FreeBSD 15 port runs no kernel callouts at all, so
+# delayed ACKs, keepalives and TCP retransmission never fire (a lost packet
+# hangs the connection). Older releases are no good either: the DPDK bundled
+# with 1.21.6 has a net_tap RX checksum bug that drops every TCP packet.
+# When bumping, re-run the integration tests (including tests/faults.rs, which
+# exercises the timers).
+ARG FSTACK_REF=v1.25
+ARG FSTACK_COMMIT=761639943bdda33103aa98241ca6a3079f1c1b7e
+RUN git clone --recurse-submodules --depth 1 --branch ${FSTACK_REF} https://github.com/F-Stack/f-stack.git && \
+    test "$(git -C f-stack rev-parse HEAD)" = "${FSTACK_COMMIT}"
 
 # Build DPDK
 WORKDIR /opt/f-stack/dpdk
@@ -67,6 +68,21 @@ ENV FF_PATH=/opt/f-stack
 # sources (kern/sys_generic.c); same class as the -Wno-error=stringop-*
 # exemptions F-Stack's Makefile already carries.
 RUN make -j$(nproc) CC="cc -Wno-error=array-bounds"
+
+# Install Rust (after F-Stack so a toolchain bump doesn't rebuild DPDK).
+# RUST_VERSION is what the project is built and tested with; RUST_MSRV is the
+# minimum supported version declared in Cargo.toml, checked in CI.
+ARG RUST_VERSION=1.99.0
+ARG RUST_MSRV=1.97.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} -c clippy && \
+    /root/.cargo/bin/rustup toolchain install ${RUST_MSRV} --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Test runner: F-Stack can start once per process, and nextest runs every
+# test in its own process.
+ARG NEXTEST_VERSION=0.9.146
+RUN curl -sSfL "https://get.nexte.st/${NEXTEST_VERSION}/linux" | tar zxf - -C /root/.cargo/bin
 
 WORKDIR /app
 

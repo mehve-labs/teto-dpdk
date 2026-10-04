@@ -1,3 +1,18 @@
+use std::io;
+
+/// Config file used by the [`FStackConfig::for_docker`] and
+/// [`FStackConfig::for_bare_metal`] profiles: `$TETO_CONFIG` if set,
+/// otherwise `config.ini` in the working directory. The variable is read
+/// when the profile is built, not when F-Stack is initialised.
+pub const CONFIG_ENV: &str = "TETO_CONFIG";
+
+/// Selects the profile used by [`FStackConfig::from_env`].
+pub const PROFILE_ENV: &str = "TETO_PROFILE";
+
+fn default_config_file() -> String {
+    std::env::var(CONFIG_ENV).unwrap_or_else(|_| "config.ini".into())
+}
+
 /// Builder for F-Stack / DPDK initialisation arguments.
 ///
 /// Separates the config-file arguments (understood by F-Stack's own parser)
@@ -5,25 +20,50 @@
 ///
 /// # Examples
 ///
-/// Docker / TAP development:
+/// Docker development (veth pair created by `entrypoint.sh`):
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::for_docker();
 /// ```
 ///
 /// Bare metal with a real NIC bound via VFIO:
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::for_bare_metal();
 /// ```
 ///
 /// Custom build:
 /// ```rust
+/// # use teto_dpdk::config::FStackConfig;
 /// let cfg = FStackConfig::new("config.ini")
-///     .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+///     .with_eal_arg("--vdev=net_af_packet0,iface=eth1")
 ///     .with_eal_arg("--no-pci");
 /// ```
 pub struct FStackConfig {
     config_file: String,
     eal_args:    Vec<String>,
+    capture_init_output: bool,
+    process:     Option<(ProcType, u16)>,
+}
+
+/// Role of this process in an F-Stack multi-process group (see
+/// [`FStackConfig::with_process`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcType {
+    /// Owns the NIC and the shared memory; must be started (and finish
+    /// initialising) before any secondary.
+    Primary,
+    /// Attaches to the primary's NIC and memory and serves its own queue.
+    Secondary,
+}
+
+impl ProcType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProcType::Primary => "primary",
+            ProcType::Secondary => "secondary",
+        }
+    }
 }
 
 impl FStackConfig {
@@ -32,7 +72,21 @@ impl FStackConfig {
         Self {
             config_file: config_file.into(),
             eal_args:    Vec::new(),
+            capture_init_output: false,
+            process:     None,
         }
+    }
+
+    /// Use a different `config.ini`. Relative paths are resolved against the
+    /// working directory when F-Stack is initialised.
+    pub fn with_config_file(mut self, config_file: impl Into<String>) -> Self {
+        self.config_file = config_file.into();
+        self
+    }
+
+    /// The `config.ini` path F-Stack will be initialised from.
+    pub fn config_file(&self) -> &str {
+        &self.config_file
     }
 
     /// Append a single extra EAL argument (e.g. `"--no-pci"`).
@@ -41,40 +95,94 @@ impl FStackConfig {
         self
     }
 
+    /// Capture what F-Stack, DPDK and the FreeBSD stack print during
+    /// initialisation (EAL messages, config echo, interface setup — a few
+    /// dozen lines) instead of letting it reach stdout/stderr. On failure it
+    /// is appended to the error; on success it is available from
+    /// [`FStack::init_output`](crate::FStack::init_output).
+    ///
+    /// This redirects the whole process's stdout and stderr while F-Stack
+    /// initialises (typically under a second), so anything other threads
+    /// print in that window is captured too. Off by default.
+    pub fn capture_init_output(mut self, capture: bool) -> Self {
+        self.capture_init_output = capture;
+        self
+    }
+
+    /// Run as process `proc_id` of an F-Stack multi-process group, to scale
+    /// across cores: one process per core, each with its own NIC queue (RSS
+    /// spreads flows across them) and its own stack.
+    ///
+    /// `proc_id` indexes the cores in `lcore_mask` (`config.ini`): 0 is the
+    /// lowest set bit. Process 0 is normally the [`ProcType::Primary`] and
+    /// must finish initialising before the secondaries start. Each process
+    /// runs its own [`FStack`](crate::FStack) (or teto-tokio runtime) and can
+    /// listen on the same address and port; a connection is served entirely
+    /// by the process whose queue receives it.
+    ///
+    /// DPDK multi-process requires hugepages, so this does not work with
+    /// `no_huge=1` (the Docker profile). Not set by default: a single
+    /// process uses the first core in `lcore_mask`. See
+    /// `docs/architecture.md` ("Scaling across cores").
+    pub fn with_process(mut self, proc_type: ProcType, proc_id: u16) -> Self {
+        self.process = Some((proc_type, proc_id));
+        self
+    }
+
+    pub(crate) fn captures_init_output(&self) -> bool {
+        self.capture_init_output
+    }
+
     // ------------------------------------------------------------------
     // Pre-built profiles
     // ------------------------------------------------------------------
 
-    /// Docker / TAP device profile.
+    /// Docker profile (no NIC). Reads `$TETO_CONFIG`, or `config.ini` in the
+    /// working directory.
     ///
-    /// Injects the three EAL arguments that are required when running DPDK
-    /// inside a container with a TAP virtual interface instead of a real NIC:
+    /// F-Stack attaches to one end of a veth pair that the project's
+    /// `entrypoint.sh` creates (`teto0-dpdk`); the kernel uses the other end
+    /// (`teto0`, 10.0.0.2). EAL arguments:
     ///
-    /// - `--vdev=net_tap0,iface=dtap0,mac=fixed`  — create a TAP-backed DPDK
-    ///   port tied to the kernel interface `dtap0`; `mac=fixed` makes the MAC
-    ///   deterministic so that it is stable across restarts. The kernel side of
-    ///   the TAP is automatically assigned a *different* MAC by `entrypoint.sh`
-    ///   (derived from the DPDK MAC by incrementing the last octet). The two
-    ///   MACs must differ: FreeBSD's `ether_input` drops frames whose source
-    ///   MAC matches the interface MAC (anti-loop protection).
-    /// - `--no-pci`  — skip PCI bus scan; without this DPDK could claim a PCI
-    ///   device and push the TAP device to port 1, breaking `port_list=0`.
-    /// - `--iova-mode=va`  — force Virtual Address IOVA mode, required in
-    ///   containers / WSL2 where physical address access is unavailable.
+    /// - `--vdev=net_af_packet0,iface=teto0-dpdk` — DPDK's `af_packet` driver
+    ///   on the veth end, in place of a NIC;
+    /// - `--no-pci` — don't scan PCI, so the virtual device is port 0;
+    /// - `--iova-mode=va` — virtual-address IOVA, required in containers where
+    ///   physical addresses aren't available.
     pub fn for_docker() -> Self {
-        Self::new("config.ini")
-            .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
+        Self::new(default_config_file())
+            .with_eal_arg("--vdev=net_af_packet0,iface=teto0-dpdk")
             .with_eal_arg("--no-pci")
             .with_eal_arg("--iova-mode=va")
     }
 
-    /// Bare-metal / AWS profile.
+    /// Profile chosen by `$TETO_PROFILE`: `docker` (default) or `bare-metal`,
+    /// with the config file from `$TETO_CONFIG` (default `config.ini`). Used
+    /// by the examples so they run unchanged in either environment.
+    pub fn from_env() -> io::Result<Self> {
+        let profile = match std::env::var(PROFILE_ENV) {
+            Ok(p) => p.to_ascii_lowercase(),
+            Err(std::env::VarError::NotPresent) => "docker".into(),
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{PROFILE_ENV}: {e}"))),
+        };
+        match profile.as_str() {
+            "docker" => Ok(Self::for_docker()),
+            "bare-metal" => Ok(Self::for_bare_metal()),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{PROFILE_ENV}={other:?}: expected \"docker\" or \"bare-metal\""),
+            )),
+        }
+    }
+
+    /// Bare-metal / AWS profile. Reads `$TETO_CONFIG`, or `config.ini` in
+    /// the working directory.
     ///
     /// No extra EAL arguments are needed: DPDK discovers the NIC via the
     /// `allow=` key in `config.ini`, PCI scanning is required, and IOVA mode
     /// is auto-detected based on whether IOMMU is present.
     pub fn for_bare_metal() -> Self {
-        Self::new("config.ini")
+        Self::new(default_config_file())
     }
 
     // ------------------------------------------------------------------
@@ -83,11 +191,16 @@ impl FStackConfig {
 
     /// The arguments passed to `ff_load_config` (F-Stack's config parser).
     pub fn config_args(&self) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "teto".to_string(),
             "--conf".to_string(),
             self.config_file.clone(),
-        ]
+        ];
+        if let Some((proc_type, proc_id)) = self.process {
+            args.push(format!("--proc-type={}", proc_type.as_str()));
+            args.push(format!("--proc-id={proc_id}"));
+        }
+        args
     }
 
     /// Extra EAL arguments injected into `dpdk_argv` after `ff_load_config`.
@@ -107,6 +220,7 @@ impl FStackConfig {
 /// methods to override specific values.
 ///
 /// ```rust
+/// # use teto_dpdk::config::TcpSocketOptions;
 /// let opts = TcpSocketOptions::default()
 ///     .nodelay(true)
 ///     .keepalive(true)
@@ -114,6 +228,11 @@ impl FStackConfig {
 ///     .keepalive_interval_secs(5)
 ///     .keepalive_count(3);
 /// ```
+///
+/// There is no `TCP_QUICKACK`: it's Linux-only and FreeBSD (so F-Stack) has
+/// no per-socket equivalent. To ACK every segment immediately, set
+/// `net.inet.tcp.delayed_ack=0` under `[freebsd.sysctl]` in `config.ini`;
+/// it applies to all connections.
 #[derive(Clone, Debug, Default)]
 pub struct TcpSocketOptions {
     /// Disable Nagle's algorithm — send data immediately without coalescing
@@ -144,16 +263,11 @@ pub struct TcpSocketOptions {
     /// Send buffer size in bytes. FreeBSD default: ~64 KB.
     pub send_buf: Option<u32>,
 
-    /// Linger timeout in seconds. When set, `ff_close` blocks (up to this
-    /// many seconds) until buffered data is sent, then sends RST if it
-    /// couldn't drain in time. When `None`, close returns immediately and
-    /// the stack drains in the background.
+    /// `SO_LINGER` timeout in seconds. Sockets here are non-blocking, so
+    /// closing never blocks; `Some(0)` makes close send RST and discard
+    /// unsent data (which defeats teto-tokio's flush-on-drop). When `None`,
+    /// the stack sends buffered data in the background after close.
     pub linger_secs: Option<u32>,
-
-    /// Disable delayed ACKs — acknowledge segments immediately instead of
-    /// waiting up to 40ms to piggyback the ACK on outgoing data.
-    /// Complementary to `nodelay` for lowest latency.
-    pub quickack: Option<bool>,
 
     /// Allow multiple sockets to bind the same address:port combination.
     /// Useful for multi-process F-Stack setups.
@@ -161,30 +275,41 @@ pub struct TcpSocketOptions {
 }
 
 impl TcpSocketOptions {
+    /// Set [`nodelay`](Self::nodelay) (`TCP_NODELAY`).
     pub fn nodelay(mut self, v: bool) -> Self { self.nodelay = Some(v); self }
+    /// Set [`keepalive`](Self::keepalive) (`SO_KEEPALIVE`).
     pub fn keepalive(mut self, v: bool) -> Self { self.keepalive = Some(v); self }
+    /// Set [`keepalive_idle_secs`](Self::keepalive_idle_secs) (`TCP_KEEPIDLE`).
     pub fn keepalive_idle_secs(mut self, v: u32) -> Self { self.keepalive_idle_secs = Some(v); self }
+    /// Set [`keepalive_interval_secs`](Self::keepalive_interval_secs) (`TCP_KEEPINTVL`).
     pub fn keepalive_interval_secs(mut self, v: u32) -> Self { self.keepalive_interval_secs = Some(v); self }
+    /// Set [`keepalive_count`](Self::keepalive_count) (`TCP_KEEPCNT`).
     pub fn keepalive_count(mut self, v: u32) -> Self { self.keepalive_count = Some(v); self }
+    /// Set [`recv_buf`](Self::recv_buf) (`SO_RCVBUF`).
     pub fn recv_buf(mut self, v: u32) -> Self { self.recv_buf = Some(v); self }
+    /// Set [`send_buf`](Self::send_buf) (`SO_SNDBUF`).
     pub fn send_buf(mut self, v: u32) -> Self { self.send_buf = Some(v); self }
+    /// Set [`linger_secs`](Self::linger_secs) (`SO_LINGER`).
     pub fn linger_secs(mut self, v: u32) -> Self { self.linger_secs = Some(v); self }
-    pub fn quickack(mut self, v: bool) -> Self { self.quickack = Some(v); self }
+    /// Set [`reuse_port`](Self::reuse_port) (`SO_REUSEPORT`, listeners only).
     pub fn reuse_port(mut self, v: bool) -> Self { self.reuse_port = Some(v); self }
+}
 
-    /// Convert to the flat cxx-bridge struct. `-1` encodes "not set / use FreeBSD default".
-    pub fn to_ffi(&self) -> crate::fstack::ffi::TcpSocketOptionsFfi {
-        crate::fstack::ffi::TcpSocketOptionsFfi {
-            nodelay:                 self.nodelay.map_or(-1, |v| v as i32),
-            keepalive:               self.keepalive.map_or(-1, |v| v as i32),
-            keepalive_idle_secs:     self.keepalive_idle_secs.map_or(-1, |v| v as i32),
-            keepalive_interval_secs: self.keepalive_interval_secs.map_or(-1, |v| v as i32),
-            keepalive_count:         self.keepalive_count.map_or(-1, |v| v as i32),
-            recv_buf:                self.recv_buf.map_or(-1, |v| v as i32),
-            send_buf:                self.send_buf.map_or(-1, |v| v as i32),
-            linger_secs:             self.linger_secs.map_or(-1, |v| v as i32),
-            quickack:                self.quickack.map_or(-1, |v| v as i32),
-            reuse_port:              self.reuse_port.map_or(-1, |v| v as i32),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_process_by_default() {
+        assert_eq!(FStackConfig::new("f.ini").config_args(), ["teto", "--conf", "f.ini"]);
+    }
+
+    #[test]
+    fn process_args() {
+        let cfg = FStackConfig::new("f.ini").with_process(ProcType::Secondary, 3);
+        assert_eq!(
+            cfg.config_args(),
+            ["teto", "--conf", "f.ini", "--proc-type=secondary", "--proc-id=3"]
+        );
     }
 }
