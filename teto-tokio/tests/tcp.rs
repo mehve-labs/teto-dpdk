@@ -105,10 +105,6 @@ fn tcp_suite() {
         // Rejected before reaching F-Stack.
         let v6 = TetoTcpListener::bind(&rt, "[::1]:8080".parse().unwrap(), TcpSocketOptions::default()).await;
         assert_eq!(v6.err().unwrap().kind(), ErrorKind::InvalidInput);
-        #[allow(deprecated)]
-        let quickack = TcpSocketOptions::default().quickack(true);
-        let qa = TetoTcpListener::bind(&rt, addr(), quickack).await;
-        assert_eq!(qa.err().unwrap().kind(), ErrorKind::Unsupported);
 
         let opts = TcpSocketOptions::default().nodelay(true).keepalive(true);
         let mut listener = TetoTcpListener::bind(&rt, addr(), opts).await.expect("bind");

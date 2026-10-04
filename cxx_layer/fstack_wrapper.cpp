@@ -16,6 +16,7 @@ extern void ff_os_errno(int error);
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -23,6 +24,7 @@ extern void ff_os_errno(int error);
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include <vector>
 
 namespace teto {
@@ -47,6 +49,59 @@ struct sockaddr_in make_addr(uint32_t ip, uint16_t port) {
 
 const struct timespec ZERO_TIMEOUT = {0, 0};
 
+// Redirects stdout and stderr to an anonymous temp file for its lifetime
+// and hands what was written to `out` when destroyed (also during exception
+// unwinding). A file rather than a pipe: init output can exceed a pipe
+// buffer, and nothing reads the pipe until init returns.
+class CaptureOutput {
+public:
+    CaptureOutput(bool enabled, rust::String& out) : out_(out) {
+        if (!enabled) {
+            return;
+        }
+        file_ = std::tmpfile();
+        if (file_ == nullptr) {
+            return;
+        }
+        std::fflush(stdout);
+        std::fflush(stderr);
+        saved_out_ = dup(STDOUT_FILENO);
+        saved_err_ = dup(STDERR_FILENO);
+        dup2(fileno(file_), STDOUT_FILENO);
+        dup2(fileno(file_), STDERR_FILENO);
+    }
+
+    ~CaptureOutput() {
+        if (file_ == nullptr) {
+            return;
+        }
+        std::fflush(stdout);
+        std::fflush(stderr);
+        dup2(saved_out_, STDOUT_FILENO);
+        dup2(saved_err_, STDERR_FILENO);
+        close(saved_out_);
+        close(saved_err_);
+        std::string text;
+        std::rewind(file_);
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), file_)) > 0) {
+            text.append(buf, n);
+        }
+        std::fclose(file_);
+        out_ = rust::String::lossy(text);
+    }
+
+    CaptureOutput(const CaptureOutput&) = delete;
+    CaptureOutput& operator=(const CaptureOutput&) = delete;
+
+private:
+    rust::String& out_;
+    std::FILE* file_ = nullptr;
+    int saved_out_ = -1;
+    int saved_err_ = -1;
+};
+
 int loop_trampoline(void* arg) {
     teto_loop_tick(*static_cast<LoopCtx*>(arg));
     return 0;
@@ -55,7 +110,10 @@ int loop_trampoline(void* arg) {
 } // namespace
 
 void init(const rust::Vec<rust::String>& config_args,
-          const rust::Vec<rust::String>& eal_args) {
+          const rust::Vec<rust::String>& eal_args,
+          bool capture,
+          rust::String& output) {
+    CaptureOutput captured(capture, output);
     // F-Stack may keep pointers into argv, so these strings are leaked on purpose
     // (init runs once per process).
     std::vector<char*> argv;
@@ -131,8 +189,8 @@ int32_t sock_set_opt(int32_t fd, SockOpt opt, int32_t value) {
         case SockOpt::KeepCnt:   level = IPPROTO_TCP; name = TCP_KEEPCNT; break;
         case SockOpt::Linger: {
             struct linger lg;
-            lg.l_onoff = value >= 0 ? 1 : 0;
-            lg.l_linger = value >= 0 ? value : 0;
+            lg.l_onoff = 1;
+            lg.l_linger = value;
             return ret32(ff_setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)));
         }
         default:

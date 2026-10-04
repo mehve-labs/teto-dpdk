@@ -12,8 +12,11 @@ fn panic_in_tick_propagates() {
     let cfg = FStackConfig::new(concat!(env!("CARGO_MANIFEST_DIR"), "/config.ini"))
         .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
         .with_eal_arg("--no-pci")
-        .with_eal_arg("--iova-mode=va");
+        .with_eal_arg("--iova-mode=va")
+        .capture_init_output(true);
     let fs = FStack::init(&cfg).expect("init");
+    // F-Stack's interface setup chatter was captured rather than printed.
+    assert!(fs.init_output().contains("Ethernet address"), "{}", fs.init_output());
     let socket = UdpSocket::bind(&fs, "0.0.0.0:9000".parse().unwrap()).unwrap();
 
     let mut ticks = 0;

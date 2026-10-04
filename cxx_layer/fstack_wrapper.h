@@ -14,9 +14,13 @@ struct KEvent;
 struct LoopCtx;
 enum class SockOpt : ::std::int32_t;
 
-// Runtime. `init` throws (-> Rust `Err`) on failure.
+// Runtime. `init` throws (-> Rust `Err`) on failure. With `capture`, what
+// F-Stack/DPDK print to stdout/stderr during init goes to `output` instead
+// (also when init fails).
 void init(const rust::Vec<rust::String>& config_args,
-          const rust::Vec<rust::String>& eal_args);
+          const rust::Vec<rust::String>& eal_args,
+          bool capture,
+          rust::String& output);
 void run(LoopCtx& ctx);
 void stop();
 

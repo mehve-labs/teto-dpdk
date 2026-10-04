@@ -2,11 +2,13 @@ use std::io;
 use std::marker::PhantomData;
 use std::panic;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 use crate::config::FStackConfig;
 use crate::sys::{ffi, LoopCtx};
 
 static INIT_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+static INIT_OUTPUT: OnceLock<String> = OnceLock::new();
 
 // Lifecycle of the process-wide F-Stack instance. When `ff_run` returns,
 // F-Stack tears itself down (config unload, `rte_eal_cleanup`), so any ff_*
@@ -60,10 +62,26 @@ impl FStack {
                 "F-Stack has already been initialised in this process",
             ));
         }
-        ffi::init(&cfg.config_args(), &cfg.eal_args())
-            .map_err(|e| io::Error::other(e.what().to_owned()))?;
+        let mut output = String::new();
+        let result = ffi::init(&cfg.config_args(), &cfg.eal_args(), cfg.captures_init_output(), &mut output);
+        if let Err(e) = result {
+            let mut msg = e.what().to_owned();
+            if !output.trim().is_empty() {
+                msg.push_str("\n--- F-Stack initialisation output ---\n");
+                msg.push_str(output.trim_end());
+            }
+            return Err(io::Error::other(msg));
+        }
+        let _ = INIT_OUTPUT.set(output);
         STATE.store(READY, Ordering::Release);
         Ok(FStack { _not_send: PhantomData })
+    }
+
+    /// What F-Stack, DPDK and the FreeBSD stack printed during
+    /// initialisation, if [`FStackConfig::capture_init_output`] was enabled;
+    /// empty otherwise.
+    pub fn init_output(&self) -> &'static str {
+        INIT_OUTPUT.get().map_or("", String::as_str)
     }
 
     /// Run the F-Stack poll loop on this thread, calling `tick` once per

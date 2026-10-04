@@ -124,7 +124,6 @@ impl TcpListener {
     /// option F-Stack rejects fails here rather than on every accept.
     pub fn bind(_fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
         let addr = require_v4(addr)?;
-        opts.validate()?;
         let fd = nonblocking_socket(ffi::sock_tcp)?;
         set_opt(&fd, ffi::SockOpt::ReuseAddr, 1)?;
         if opts.reuse_port == Some(true) {
@@ -172,7 +171,6 @@ impl TcpStream {
     /// `opts` are applied before connecting.
     pub fn connect(_fs: &FStack, addr: SocketAddr, opts: &TcpSocketOptions) -> io::Result<Self> {
         let addr = require_v4(addr)?;
-        opts.validate()?;
         let fd = nonblocking_socket(ffi::sock_tcp)?;
         apply_tcp_options(&fd, opts)?;
         match cvt32(ffi::sock_connect_v4(fd.get()?, (*addr.ip()).into(), addr.port())) {

@@ -18,6 +18,7 @@ fn config() -> FStackConfig {
         .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
         .with_eal_arg("--no-pci")
         .with_eal_arg("--iova-mode=va")
+        .capture_init_output(true)
 }
 
 fn sa(s: &str) -> SocketAddr {
@@ -100,6 +101,7 @@ fn runtime_suite() {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let rt = TetoRuntime::start(config()).await.expect("start");
+        assert!(rt.init_output().contains("EAL"), "init output not captured: {:?}", rt.init_output());
         let opts = TcpSocketOptions::default().nodelay(true);
 
         // A failed bind leaves the runtime usable.

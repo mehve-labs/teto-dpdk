@@ -65,7 +65,6 @@ impl TetoTcpListener {
     /// `config.ini`) leaves the runtime usable.
     pub async fn bind(rt: &TetoRuntime, addr: SocketAddr, opts: TcpSocketOptions) -> io::Result<Self> {
         crate::require_v4(addr)?;
-        opts.validate()?;
         let (accept_tx, accept_rx) = mpsc::channel(ACCEPT_QUEUE);
         let local_addr = rt.call(|reply| Cmd::ListenTcp { addr, opts, accept_tx, reply }).await?;
         Ok(TetoTcpListener { accept_rx, local_addr, rt: rt.clone() })

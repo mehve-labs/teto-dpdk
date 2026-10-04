@@ -32,12 +32,6 @@ fn lowlevel_suite() {
         TcpListener::bind(&fs, sa("[::1]:8080"), &opts).unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
-    #[allow(deprecated)]
-    let quickack = TcpSocketOptions::default().quickack(true);
-    assert_eq!(
-        TcpListener::bind(&fs, sa("0.0.0.0:8080"), &quickack).unwrap_err().kind(),
-        ErrorKind::Unsupported
-    );
     let listener = TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts).expect("bind");
     assert_eq!(
         TcpListener::bind(&fs, sa("0.0.0.0:8080"), &opts).unwrap_err().kind(),

@@ -92,9 +92,17 @@ fn udp_suite() {
                 }
                 seen
             });
+            // Bursts of 100 (~45 KB): each arrives faster than one poll
+            // iteration, so the driver must drain many per tick. A single
+            // 500-datagram burst (~225 KB) can overflow F-Stack's default UDP
+            // receive buffer (~42 KB) whenever the emulated F-Stack thread
+            // stalls, which is legitimate UDP loss, not a driver bug.
             for i in 0..N {
                 let msg = format!("dgram-{i:04}-{}", "x".repeat(i % 900));
                 client.send_to(msg.as_bytes(), server).unwrap();
+                if i % 100 == 99 {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
             }
             let seen = collector.join().unwrap();
             // UDP over TAP should be lossless at this rate; allow a little slack.

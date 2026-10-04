@@ -50,7 +50,6 @@ impl TetoTcpStream {
     /// cancelling closes the half-open socket.
     pub async fn connect(rt: &TetoRuntime, addr: SocketAddr, opts: TcpSocketOptions) -> io::Result<Self> {
         crate::require_v4(addr)?;
-        opts.validate()?;
         let connected = rt.call(|reply| Cmd::Connect { addr, opts, reply }).await?;
         Ok(Self::from_connected(connected, rt.clone()))
     }

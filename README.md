@@ -141,7 +141,7 @@ Rules the API enforces:
 - `FStack::init` succeeds once per process (DPDK can't be re-initialised).
 - `FStack::run` runs once. When it returns (after `FStack::stop`, or a panic in your closure, which is re-raised), F-Stack tears itself down; afterwards every socket operation returns `BrokenPipe`.
 - kqueue registrations are level-triggered and carry a `u64` token you choose. Use tokens that are never reused, not descriptor numbers.
-- Unsupported options are errors, not silent no-ops: IPv6 addresses (`InvalidInput`) and `TcpSocketOptions::quickack` (`Unsupported`; F-Stack has no `TCP_QUICKACK`).
+- Unsupported input is an error, not a silent no-op: IPv6 addresses fail with `InvalidInput`, and a socket option F-Stack rejects fails the bind. There is no `quickack` option: FreeBSD has no per-socket `TCP_QUICKACK`; set `net.inet.tcp.delayed_ack=0` in `config.ini` to ACK immediately (global).
 
 ## Configuration
 
@@ -159,6 +159,8 @@ let cfg = FStackConfig::new("config.ini")
     .with_eal_arg("--vdev=net_tap0,iface=dtap0,mac=fixed")
     .with_eal_arg("--no-pci");
 ```
+
+F-Stack and DPDK print a few dozen lines while initialising (EAL messages, a config echo, interface setup). `FStackConfig::capture_init_output(true)` keeps them off the terminal. On failure they're appended to the error, which is usually the best diagnostic available; on success they're available from `FStack::init_output()` / `TetoRuntime::init_output()`. It redirects the process's stdout/stderr for the duration of init, so leave it off if other threads may be printing then. For DPDK's runtime logging, the `[dpdk]` `log_level` key in `config.ini` applies.
 
 ## Project Structure
 

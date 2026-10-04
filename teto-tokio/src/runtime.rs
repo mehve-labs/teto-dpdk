@@ -31,6 +31,7 @@ pub(crate) enum Cmd {
 
 struct Shared {
     cmd_tx: mpsc::UnboundedSender<Cmd>,
+    init_output: &'static str,
 }
 
 /// Handle to the F-Stack runtime: a dedicated OS thread running F-Stack's
@@ -80,7 +81,7 @@ impl TetoRuntime {
     /// includes cancelling this future after initialisation has started.
     pub async fn start(cfg: FStackConfig) -> io::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = oneshot::channel::<io::Result<()>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<io::Result<&'static str>>();
         std::thread::Builder::new().name("fstack".into()).spawn(move || {
             let started = FStack::init(&cfg).and_then(|fs| Ok((fs, Driver::new(fs, cmd_rx)?)));
             let (fs, mut driver) = match started {
@@ -90,7 +91,7 @@ impl TetoRuntime {
                     return;
                 }
             };
-            let _ = ready_tx.send(Ok(()));
+            let _ = ready_tx.send(Ok(fs.init_output()));
             // Runs until nothing uses the runtime any more (or a tick
             // panics; the panic then resumes here and ends the thread).
             let _ = fs.run(|| {
@@ -99,10 +100,17 @@ impl TetoRuntime {
                 }
             });
         })?;
-        ready_rx
+        let init_output = ready_rx
             .await
             .map_err(|_| io::Error::other("F-Stack thread exited during initialisation"))??;
-        Ok(TetoRuntime { shared: Arc::new(Shared { cmd_tx }) })
+        Ok(TetoRuntime { shared: Arc::new(Shared { cmd_tx, init_output }) })
+    }
+
+    /// What F-Stack and DPDK printed during initialisation, if the config
+    /// enabled [`FStackConfig::capture_init_output`]; empty otherwise. (On
+    /// failure it is part of the error returned by [`start`](Self::start).)
+    pub fn init_output(&self) -> &str {
+        self.shared.init_output
     }
 
     /// Send a command to the F-Stack thread and wait for its reply.

@@ -27,6 +27,7 @@
 pub struct FStackConfig {
     config_file: String,
     eal_args:    Vec<String>,
+    capture_init_output: bool,
 }
 
 impl FStackConfig {
@@ -35,6 +36,7 @@ impl FStackConfig {
         Self {
             config_file: config_file.into(),
             eal_args:    Vec::new(),
+            capture_init_output: false,
         }
     }
 
@@ -42,6 +44,24 @@ impl FStackConfig {
     pub fn with_eal_arg(mut self, arg: impl Into<String>) -> Self {
         self.eal_args.push(arg.into());
         self
+    }
+
+    /// Capture what F-Stack, DPDK and the FreeBSD stack print during
+    /// initialisation (EAL messages, config echo, interface setup — a few
+    /// dozen lines) instead of letting it reach stdout/stderr. On failure it
+    /// is appended to the error; on success it is available from
+    /// [`FStack::init_output`](crate::FStack::init_output).
+    ///
+    /// This redirects the whole process's stdout and stderr while F-Stack
+    /// initialises (typically under a second), so anything other threads
+    /// print in that window is captured too. Off by default.
+    pub fn capture_init_output(mut self, capture: bool) -> Self {
+        self.capture_init_output = capture;
+        self
+    }
+
+    pub(crate) fn captures_init_output(&self) -> bool {
+        self.capture_init_output
     }
 
     // ------------------------------------------------------------------
@@ -118,6 +138,11 @@ impl FStackConfig {
 ///     .keepalive_interval_secs(5)
 ///     .keepalive_count(3);
 /// ```
+///
+/// There is no `TCP_QUICKACK`: it's Linux-only and FreeBSD (so F-Stack) has
+/// no per-socket equivalent. To ACK every segment immediately, set
+/// `net.inet.tcp.delayed_ack=0` under `[freebsd.sysctl]` in `config.ini`;
+/// it applies to all connections.
 #[derive(Clone, Debug, Default)]
 pub struct TcpSocketOptions {
     /// Disable Nagle's algorithm — send data immediately without coalescing
@@ -154,10 +179,6 @@ pub struct TcpSocketOptions {
     /// the stack sends buffered data in the background after close.
     pub linger_secs: Option<u32>,
 
-    /// Not supported: F-Stack has no `TCP_QUICKACK` (it is Linux-only), so
-    /// binding with this set fails with [`std::io::ErrorKind::Unsupported`].
-    pub quickack: Option<bool>,
-
     /// Allow multiple sockets to bind the same address:port combination.
     /// Useful for multi-process F-Stack setups.
     pub reuse_port: Option<bool>,
@@ -172,19 +193,5 @@ impl TcpSocketOptions {
     pub fn recv_buf(mut self, v: u32) -> Self { self.recv_buf = Some(v); self }
     pub fn send_buf(mut self, v: u32) -> Self { self.send_buf = Some(v); self }
     pub fn linger_secs(mut self, v: u32) -> Self { self.linger_secs = Some(v); self }
-    #[deprecated(note = "F-Stack does not support TCP_QUICKACK; binding with it set fails")]
-    pub fn quickack(mut self, v: bool) -> Self { self.quickack = Some(v); self }
     pub fn reuse_port(mut self, v: bool) -> Self { self.reuse_port = Some(v); self }
-
-    /// Check for options F-Stack cannot honour. Called by the bind functions;
-    /// exposed so callers can fail fast before initialising F-Stack.
-    pub fn validate(&self) -> std::io::Result<()> {
-        if self.quickack.is_some() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "TCP_QUICKACK is not supported by F-Stack",
-            ));
-        }
-        Ok(())
-    }
 }

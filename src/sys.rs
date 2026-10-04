@@ -32,7 +32,7 @@ pub(crate) mod ffi {
         KeepCnt,
         RecvBuf,
         SendBuf,
-        /// Value is the linger timeout in seconds; negative disables linger.
+        /// Enables `SO_LINGER` with this timeout in seconds (0: close sends RST).
         Linger,
     }
 
@@ -44,7 +44,12 @@ pub(crate) mod ffi {
     unsafe extern "C++" {
         include!("fstack_wrapper.h");
 
-        fn init(config_args: &Vec<String>, eal_args: &Vec<String>) -> Result<()>;
+        fn init(
+            config_args: &Vec<String>,
+            eal_args: &Vec<String>,
+            capture: bool,
+            output: &mut String,
+        ) -> Result<()>;
         fn run(ctx: &mut LoopCtx);
         fn stop();
 
