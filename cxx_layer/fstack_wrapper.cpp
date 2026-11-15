@@ -17,6 +17,7 @@ extern void ff_os_errno(int error);
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -80,6 +81,11 @@ const struct timespec ZERO_TIMEOUT = {0, 0};
 // and hands what was written to `out` when destroyed (also during exception
 // unwinding). A file rather than a pipe: init output can exceed a pipe
 // buffer, and nothing reads the pipe until init returns.
+//
+// Many F-Stack/DPDK init failures don't return: they call exit() or
+// rte_exit() (no hugepages, a bad --vdev, an unknown port, ...). An atexit
+// handler restores stdout/stderr and replays what was captured to stderr, so
+// those failures aren't silent.
 class CaptureOutput {
 public:
     CaptureOutput(bool enabled, rust::String& out) : out_(out) {
@@ -96,12 +102,29 @@ public:
         saved_err_ = dup(STDERR_FILENO);
         dup2(fileno(file_), STDOUT_FILENO);
         dup2(fileno(file_), STDERR_FILENO);
+        // atexit handlers can't be removed, so register once per process
+        // (init runs once anyway) and gate it on `active_`.
+        static bool registered = false;
+        if (!registered) {
+            registered = std::atexit(replay_on_exit) == 0;
+        }
+        active_ = this;
     }
 
     ~CaptureOutput() {
         if (file_ == nullptr) {
             return;
         }
+        active_ = nullptr;
+        out_ = rust::String::lossy(restore());
+    }
+
+    CaptureOutput(const CaptureOutput&) = delete;
+    CaptureOutput& operator=(const CaptureOutput&) = delete;
+
+private:
+    // Put stdout/stderr back and return what was captured.
+    std::string restore() {
         std::fflush(stdout);
         std::fflush(stderr);
         dup2(saved_out_, STDOUT_FILENO);
@@ -116,13 +139,24 @@ public:
             text.append(buf, n);
         }
         std::fclose(file_);
-        out_ = rust::String::lossy(text);
+        file_ = nullptr;
+        return text;
     }
 
-    CaptureOutput(const CaptureOutput&) = delete;
-    CaptureOutput& operator=(const CaptureOutput&) = delete;
+    static void replay_on_exit() {
+        CaptureOutput* c = active_;
+        if (c == nullptr) {
+            return;
+        }
+        active_ = nullptr;
+        std::string text = c->restore();
+        std::fputs("teto: F-Stack exited the process during initialisation; captured output:\n", stderr);
+        std::fwrite(text.data(), 1, text.size(), stderr);
+        std::fflush(stderr);
+    }
 
-private:
+    static inline CaptureOutput* active_ = nullptr;
+
     rust::String& out_;
     std::FILE* file_ = nullptr;
     int saved_out_ = -1;
