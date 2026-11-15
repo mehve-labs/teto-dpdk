@@ -1,1 +1,5 @@
 /target
+/docs/review/
+.DS_Store
+/ci/downstream/target
+/ci/downstream/Cargo.lock

@@ -1,0 +1,236 @@
+//! Readiness notification via F-Stack's kqueue.
+//!
+//! Registrations are level-triggered: an event keeps being reported on every
+//! [`Kqueue::poll`] while the condition holds. Each registration carries a
+//! caller-chosen `u64` token that is returned with its events, so callers can
+//! use tokens that are never reused (unlike F-Stack descriptor numbers).
+
+use std::io;
+use std::ops::BitOr;
+
+use crate::net::Fd;
+use crate::runtime::FStack;
+use crate::sys::{cvt32, ffi};
+
+// Values from F-Stack's ff_event.h (FreeBSD numbering).
+const EVFILT_READ: i16 = -1;
+const EVFILT_WRITE: i16 = -2;
+const EVFILT_EMPTY: i16 = -13;
+const EV_ADD: u16 = 0x0001;
+const EV_DELETE: u16 = 0x0002;
+const EV_ONESHOT: u16 = 0x0010;
+const EV_ERROR: u16 = 0x4000;
+const EV_EOF: u16 = 0x8000;
+const ENOENT: i32 = 2;
+
+pub(crate) mod sealed {
+    pub trait Sealed {
+        fn fd(&self) -> std::io::Result<i32>;
+    }
+}
+
+/// A socket that can be registered with a [`Kqueue`].
+pub trait Source: sealed::Sealed {}
+
+/// The readiness a registration asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Interest(u8);
+
+impl Interest {
+    /// No interest; registering with it removes all filters.
+    pub const NONE: Interest = Interest(0);
+    /// Data, EOF or a pending connection can be read/accepted.
+    pub const READABLE: Interest = Interest(1);
+    /// The send buffer has room (or a connect finished).
+    pub const WRITABLE: Interest = Interest(2);
+    /// The socket's send buffer is empty: for TCP, everything written has
+    /// been acknowledged by the peer (FreeBSD `EVFILT_EMPTY`).
+    pub const SEND_EMPTY: Interest = Interest(4);
+
+    /// Includes [`READABLE`](Self::READABLE).
+    pub fn is_readable(self) -> bool {
+        self.0 & 1 != 0
+    }
+
+    /// Includes [`WRITABLE`](Self::WRITABLE).
+    pub fn is_writable(self) -> bool {
+        self.0 & 2 != 0
+    }
+
+    /// Includes [`SEND_EMPTY`](Self::SEND_EMPTY).
+    pub fn is_send_empty(self) -> bool {
+        self.0 & 4 != 0
+    }
+
+    /// Asks for nothing (registering it removes all filters).
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    /// This interest plus `other`.
+    pub fn with(self, other: Interest) -> Interest {
+        Interest(self.0 | other.0)
+    }
+
+    /// This interest minus `other`.
+    pub fn without(self, other: Interest) -> Interest {
+        Interest(self.0 & !other.0)
+    }
+}
+
+impl BitOr for Interest {
+    type Output = Interest;
+    fn bitor(self, rhs: Interest) -> Interest {
+        self.with(rhs)
+    }
+}
+
+/// One readiness event returned by [`Kqueue::poll`].
+#[derive(Clone, Copy, Debug)]
+pub struct Event {
+    token: u64,
+    readable: bool,
+    writable: bool,
+    send_empty: bool,
+    eof: bool,
+    error: bool,
+}
+
+impl Event {
+    /// The token the source was registered with.
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// Data (or EOF) can be read, or a listener has a pending connection.
+    pub fn is_readable(&self) -> bool {
+        self.readable
+    }
+
+    /// The send buffer has room, or a non-blocking connect finished
+    /// (check [`TcpStream::take_error`](crate::net::TcpStream::take_error)).
+    pub fn is_writable(&self) -> bool {
+        self.writable
+    }
+
+    /// See [`Interest::SEND_EMPTY`].
+    pub fn is_send_empty(&self) -> bool {
+        self.send_empty
+    }
+
+    /// The peer closed this direction, or the connection failed. The next
+    /// read/write call reports which.
+    pub fn is_eof(&self) -> bool {
+        self.eof
+    }
+
+    /// The kqueue could not report on this registration. Retry the socket
+    /// operation to obtain the underlying error.
+    pub fn is_error(&self) -> bool {
+        self.error
+    }
+}
+
+/// Buffer of events filled by [`Kqueue::poll`].
+#[derive(Debug)]
+pub struct Events {
+    buf: Vec<ffi::KEvent>,
+    len: usize,
+}
+
+impl Events {
+    /// A buffer for up to `capacity` events per [`Kqueue::poll`] (at least 1).
+    pub fn with_capacity(capacity: usize) -> Self {
+        Events { buf: vec![ffi::KEvent::default(); capacity.max(1)], len: 0 }
+    }
+
+    /// Number of events from the last poll.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The last poll returned no events.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The events from the last poll.
+    pub fn iter(&self) -> impl Iterator<Item = Event> + '_ {
+        self.buf[..self.len].iter().map(|k| Event {
+            token: k.udata,
+            readable: k.filter == EVFILT_READ,
+            writable: k.filter == EVFILT_WRITE,
+            send_empty: k.filter == EVFILT_EMPTY,
+            eof: k.flags & EV_EOF != 0,
+            error: k.flags & EV_ERROR != 0,
+        })
+    }
+}
+
+/// An F-Stack kqueue.
+#[derive(Debug)]
+pub struct Kqueue {
+    fd: Fd,
+}
+
+impl Kqueue {
+    /// Create a kqueue.
+    pub fn new(_fs: &FStack) -> io::Result<Self> {
+        crate::runtime::ensure_alive()?;
+        let raw = cvt32(ffi::kq_create())?;
+        Ok(Kqueue { fd: Fd::new(raw) })
+    }
+
+    /// Set the interest for `source` to exactly `interest`, tagged with
+    /// `token`. Filters not in `interest` are removed, so this both registers
+    /// and re-registers. Closing a socket removes its registrations.
+    pub fn register(&self, source: &impl Source, token: u64, interest: Interest) -> io::Result<()> {
+        let fd = source.fd()?;
+        self.set_filter(fd, EVFILT_READ, token, interest.is_readable())?;
+        self.set_filter(fd, EVFILT_WRITE, token, interest.is_writable())?;
+        self.set_filter(fd, EVFILT_EMPTY, token, interest.is_send_empty())
+    }
+
+    /// Ask for one event per filter in `interest`, tagged with `token`: each
+    /// filter is removed after it reports once. Filters not in `interest` are
+    /// left as they are. Suits "wake me once when this socket is ready"
+    /// waiting: idle sockets cost nothing per poll.
+    pub fn register_oneshot(&self, source: &impl Source, token: u64, interest: Interest) -> io::Result<()> {
+        let fd = source.fd()?;
+        for (filter, on) in [
+            (EVFILT_READ, interest.is_readable()),
+            (EVFILT_WRITE, interest.is_writable()),
+            (EVFILT_EMPTY, interest.is_send_empty()),
+        ] {
+            if on {
+                self.change(fd, filter, EV_ADD | EV_ONESHOT, token)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove all interest for `source`.
+    pub fn deregister(&self, source: &impl Source) -> io::Result<()> {
+        self.register(source, 0, Interest::NONE)
+    }
+
+    fn set_filter(&self, fd: i32, filter: i16, token: u64, on: bool) -> io::Result<()> {
+        match self.change(fd, filter, if on { EV_ADD } else { EV_DELETE }, token) {
+            Err(e) if !on && e.raw_os_error() == Some(ENOENT) => Ok(()),
+            other => other,
+        }
+    }
+
+    fn change(&self, fd: i32, filter: i16, flags: u16, token: u64) -> io::Result<()> {
+        let change = ffi::KEvent { ident: fd as u64, filter, flags, fflags: 0, data: 0, udata: token };
+        cvt32(ffi::kq_change(self.fd.get()?, &change)).map(drop)
+    }
+
+    /// Collect ready events without blocking. Returns the number of events.
+    pub fn poll(&self, events: &mut Events) -> io::Result<usize> {
+        events.len = 0;
+        let n = cvt32(ffi::kq_poll(self.fd.get()?, &mut events.buf))? as usize;
+        events.len = n;
+        Ok(n)
+    }
+}

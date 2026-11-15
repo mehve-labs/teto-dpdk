@@ -1,6 +1,8 @@
 # Bare Metal and AWS Setup
 
-This guide covers running teto-dpdk on a physical machine or an AWS instance with SR-IOV. Unlike the Docker TAP setup, here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (on SR-IOV) the hypervisor data path.
+This guide covers running teto-dpdk on a physical machine or a cloud VM with an SR-IOV NIC. Unlike the Docker setup (DPDK's `af_packet` driver on a veth pair), here DPDK binds directly to a real NIC, bypassing both the kernel network stack and (with SR-IOV) the hypervisor data path.
+
+> **Status:** the project's tests run in Docker, over a veth pair. This guide follows the standard DPDK and F-Stack setup but hasn't been validated end to end on real hardware with the current release. Please report anything that doesn't work. teto builds for x86_64 Linux only.
 
 ---
 
@@ -21,10 +23,10 @@ apt install -y \
 
 ### Build DPDK and F-Stack
 
-Follow the same steps as the Dockerfile -- the binaries need to be on the host:
+Follow the same steps as the Dockerfile -- the binaries need to be on the host. Use the F-Stack release the project is tested against (v1.25). F-Stack master as of mid-2026 runs no FreeBSD kernel timers, so TCP retransmission and keepalive don't work there.
 
 ```bash
-git clone --recurse-submodules https://github.com/F-Stack/f-stack.git /opt/f-stack
+git clone --recurse-submodules --depth 1 --branch v1.25 https://github.com/F-Stack/f-stack.git /opt/f-stack
 
 # Build DPDK
 cd /opt/f-stack/dpdk
@@ -33,20 +35,26 @@ ninja -C build && ninja -C build install && ldconfig
 
 # Build F-Stack
 cd /opt/f-stack/lib
-FF_DPDK=/usr/local FF_PATH=/opt/f-stack make -j$(nproc)
+FF_DPDK=/usr/local FF_PATH=/opt/f-stack make -j$(nproc) CC="cc -Wno-error=array-bounds"
 ```
+
+(`-Wno-error=array-bounds` works around a GCC 12+ false positive in F-Stack's FreeBSD sources.)
+
+If F-Stack lives somewhere other than `/opt/f-stack`, set `FF_PATH` to its source tree when building teto (`FF_PATH=/path/to/f-stack cargo build`). If DPDK isn't installed under a standard prefix, point `PKG_CONFIG_PATH` at the directory containing `libdpdk.pc`.
 
 ### Rust
 
+teto needs Rust 1.97 or newer; CI builds with 1.99.0.
+
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0
 ```
 
 ---
 
 ## 1. Configure hugepages
 
-Hugepages are required on bare metal. The `--no-huge` workaround used in Docker trades performance for convenience -- remove it here.
+Use hugepages on bare metal. The Docker setup runs without them (`no_huge=1` in `config.ini`), which trades performance for convenience.
 
 ```bash
 # Allocate 512 × 2MB hugepages = 1 GB
@@ -157,96 +165,153 @@ Then set `lcore_mask=2` in config.ini (`2` in hex = bit 1 = core 1).
 
 ## 5. Update config.ini
 
-Remove the Docker-specific workarounds and point DPDK at the real NIC.
+Start from the repository's `config.ini` and change it for the real NIC. Remove the Docker-only settings, `no_huge=1` and `memory=512`, and use the hugepages from step 1 instead. Also remove or replace `addr6=fd00::1` and `prefix_len` under `[port0]`: they're the Docker setup's IPv6 address, and F-Stack would claim it on your network.
+
+Then point DPDK at the NIC. Comments must be on their own lines: F-Stack's INI parser doesn't strip `#` comments that follow a value.
 
 ```ini
 [dpdk]
 lcore_mask=2
 promiscuous=1
-# no_huge and memory are NOT needed -- use real hugepages
-# allow tells DPDK to use this specific NIC; omit the TAP vdev
+# Send immediately (latency); raise toward 100 to batch for bulk throughput.
+pkt_tx_delay=0
+# The NIC DPDK should use (PCI address from step 3).
 allow=0000:00:1f.6
 port_list=0
 
 [port0]
-addr=192.168.1.10        # IP you want F-Stack to own on this NIC
+# The IP F-Stack owns on this NIC.
+addr=192.168.1.10
 netmask=255.255.255.0
 broadcast=192.168.1.255
-gateway=192.168.1.1      # Your actual router
-lcore_list=1             # Core that handles this port (must match lcore_mask)
+# Your actual router.
+gateway=192.168.1.1
+# The lcore that handles this port (must be in lcore_mask).
+lcore_list=1
 
 [freebsd.boot]
 hz=100
 
 [freebsd.sysctl]
-# Leave net.inet.udp.checksum at default (1) -- real NICs compute correct checksums
 ```
 
 See [config-reference.md](config-reference.md) for all available keys.
 
 ---
 
-## 6. Update the C++ wrapper
+## 6. Select the bare-metal profile
 
-Remove the TAP-specific EAL argument injection from `cxx_layer/fstack_wrapper.cpp`. On bare metal, F-Stack handles the NIC via the `allow` key in config.ini and no manual injection is needed.
+Nothing in the code changes between Docker and bare metal. The Docker profile (`FStackConfig::for_docker()`) adds the veth setup's EAL arguments (`--vdev=net_af_packet0,iface=teto0-dpdk`, `--no-pci`, `--iova-mode=va`); the bare-metal profile adds none, and DPDK finds the NIC through the `allow` key in `config.ini`.
 
-Remove these lines from `init_fstack`:
+In your own code:
 
-```cpp
-// Remove all of these:
-dpdk_argv[dpdk_argc++] = strdup("--vdev=net_tap0,iface=dtap0");
-dpdk_argv[dpdk_argc++] = strdup("--no-pci");
-dpdk_argv[dpdk_argc++] = strdup("--iova-mode=va");
-dpdk_argv[dpdk_argc] = nullptr;
+```rust
+use teto_dpdk::FStackConfig;
+use teto_tokio::TetoRuntime;
+
+let cfg = FStackConfig::for_bare_metal().with_config_file("/etc/teto/config.ini");
+let rt = TetoRuntime::start(cfg).await?;
 ```
 
-The block becomes simply:
+The examples pick the profile from the environment (`FStackConfig::from_env()`): `TETO_PROFILE=bare-metal` selects the bare-metal profile, and `TETO_CONFIG` names the config file (default: `config.ini` in the working directory).
 
-```cpp
-if (ff_load_config(argc, argv.data()) < 0) {
-    throw std::runtime_error("F-Stack config load failed.");
-}
+Don't run `entrypoint.sh` on bare metal: it creates the Docker veth pair, which you don't need.
 
-if (ff_dpdk_init(dpdk_argc, dpdk_argv) < 0) {
-    throw std::runtime_error("F-Stack DPDK init failed.");
-}
+### In a container
+
+The bare-metal setup also works inside a container, without the Docker veth setup. The host does steps 1–4 (hugepages, IOMMU, binding the NIC to `vfio-pci`). The container needs the VFIO devices, the hugepage mount, and permission to lock memory:
+
+```bash
+docker run --rm -it \
+    --device /dev/vfio/vfio --device /dev/vfio/<group> \
+    -v /dev/hugepages:/dev/hugepages \
+    --cap-add IPC_LOCK --cap-add SYS_RAWIO --ulimit memlock=-1 \
+    -e TETO_PROFILE=bare-metal -e TETO_CONFIG=/etc/teto/config.ini \
+    -v /etc/teto:/etc/teto:ro \
+    your-image ./tcp_echo_async
 ```
 
-Also remove `entrypoint.sh` from your startup -- there is no TAP device to configure.
+(`<group>` is the IOMMU group of the NIC: `readlink /sys/bus/pci/devices/<PCI addr>/iommu_group`.) This hasn't been validated by the project yet.
 
 ---
 
 ## 7. Run
 
-```bash
-cargo run
-```
-
-F-Stack will initialize against the physical NIC. Send test traffic from another machine on the same network:
+Build as your normal user, then run the binary as root (F-Stack needs VFIO and hugepages). Running `cargo` itself under `sudo` would use root's toolchain and environment and leave a root-owned `target/`:
 
 ```bash
-echo "Hello F-Stack!" | nc -u -w1 192.168.1.10 8080
+cargo build --release -p teto-tokio --example tcp_echo_async
+sudo TETO_PROFILE=bare-metal TETO_CONFIG=$PWD/config.ini \
+    ./target/release/examples/tcp_echo_async
 ```
+
+Send test traffic from another machine on the same network:
+
+```bash
+echo "Hello F-Stack!" | nc -w3 192.168.1.10 8080
+```
+
+To compare against the kernel stack, run `scripts/bench.sh`'s two-host procedure (see the header of that script).
+
+---
+
+## 8. Multiple cores (optional)
+
+One process serves one core and one NIC queue. To use N cores, run N
+processes on the same NIC (see "Scaling across cores" in
+[architecture.md](architecture.md#scaling-across-cores) for how traffic is
+split). This hasn't been validated on hardware by the project yet.
+
+List the cores in `lcore_mask` and in the port's `lcore_list`. Isolate all
+of them (step 4). For cores 1–4:
+
+```ini
+[dpdk]
+lcore_mask=1e
+...
+
+[port0]
+...
+lcore_list=1,2,3,4
+```
+
+Start process 0 as the primary, then the others as secondaries once it has
+initialised, all with the same `config.ini`:
+
+```rust
+use teto_dpdk::{FStackConfig, ProcType};
+
+// id = 0 for the first process, 1..N for the others.
+let proc_type = if id == 0 { ProcType::Primary } else { ProcType::Secondary };
+let cfg = FStackConfig::for_bare_metal().with_process(proc_type, id);
+```
+
+Each process binds the same address and port. If a secondary can't attach
+(no primary running, or no hugepages), DPDK exits the process with status 1.
+If the primary exits, restart all of them. The NIC must support RSS with as
+many queues as processes. On AWS, the number of ENA queues depends on
+the instance size.
 
 ---
 
 ## AWS-specific notes
 
-### Instance types with SR-IOV
+Not validated by this project; these are the standard DPDK-on-EC2 steps.
 
-For meaningful kernel bypass on AWS, use an instance with SR-IOV support. The NIC's Virtual Function (VF) is exposed directly to the instance via PCIe passthrough:
+### Instance types
+
+Nitro instances expose the Elastic Network Adapter (ENA), an SR-IOV virtual function, directly to the instance. teto is x86_64-only, so use Intel/AMD families:
 
 | Family | Notes |
 |--------|-------|
-| `c5n`, `c6gn`, `c7gn` | High-bandwidth, SR-IOV, good for networking workloads |
-| `*.metal` instances | Full bare metal -- no hypervisor at all, best latency |
-| `p3dn`, `p4d` | GPU instances with high-bandwidth networking for ML/HPC |
+| `c5n`, `c6in`, `c7i` / `c7a` | High network bandwidth |
+| `*.metal` | No hypervisor at all; best latency |
 
-Standard ENA instances without SR-IOV still benefit from removing the kernel stack overhead, but the hypervisor remains in the data path.
+Attach a second ENA interface for DPDK and keep the primary one for SSH: binding the only interface to DPDK cuts you off.
 
 ### ENA driver
 
-AWS EC2 uses the ENA NIC. DPDK ships an ENA PMD (`librte_net_ena`). The setup is the same as above -- find the ENA VF's PCI address, bind to `vfio-pci`, set `allow=<PCI addr>` in config.ini.
+DPDK ships an ENA PMD (`librte_net_ena`). Find the ENA interface's PCI address, bind it to `vfio-pci`, and set `allow=<PCI addr>` in config.ini. Most instance types have no IOMMU, so VFIO needs the no-IOMMU mode from step 2. See DPDK's ENA guide for write-combining (LLQ) setup, which affects ENA performance.
 
 ```bash
 # Typical ENA PCI address on EC2
