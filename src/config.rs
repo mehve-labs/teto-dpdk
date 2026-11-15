@@ -49,6 +49,7 @@ pub struct FStackConfig {
 /// Role of this process in an F-Stack multi-process group (see
 /// [`FStackConfig::with_process`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProcType {
     /// Owns the NIC and the shared memory; must be started (and finish
     /// initialising) before any secondary.
@@ -99,7 +100,9 @@ impl FStackConfig {
     /// initialisation (EAL messages, config echo, interface setup — a few
     /// dozen lines) instead of letting it reach stdout/stderr. On failure it
     /// is appended to the error; on success it is available from
-    /// [`FStack::init_output`](crate::FStack::init_output).
+    /// [`FStack::init_output`](crate::FStack::init_output). If DPDK ends the
+    /// process instead of returning an error (`rte_exit`), it is written to
+    /// stderr on the way out.
     ///
     /// This redirects the whole process's stdout and stderr while F-Stack
     /// initialises (typically under a second), so anything other threads
@@ -190,7 +193,7 @@ impl FStackConfig {
     // ------------------------------------------------------------------
 
     /// The arguments passed to `ff_load_config` (F-Stack's config parser).
-    pub fn config_args(&self) -> Vec<String> {
+    pub(crate) fn config_args(&self) -> Vec<String> {
         let mut args = vec![
             "teto".to_string(),
             "--conf".to_string(),
@@ -204,7 +207,7 @@ impl FStackConfig {
     }
 
     /// Extra EAL arguments injected into `dpdk_argv` after `ff_load_config`.
-    pub fn eal_args(&self) -> Vec<String> {
+    pub(crate) fn eal_args(&self) -> Vec<String> {
         self.eal_args.clone()
     }
 }
@@ -217,7 +220,9 @@ impl FStackConfig {
 ///
 /// All fields are optional. When `None`, the FreeBSD default is used.
 /// Construct with `Default::default()` for all defaults, or use the builder
-/// methods to override specific values.
+/// methods to override specific values. (The struct is `#[non_exhaustive]`, so
+/// options can be added without a breaking release: it can't be built with a
+/// struct literal outside this crate.)
 ///
 /// ```rust
 /// # use teto_dpdk::config::TcpSocketOptions;
@@ -234,6 +239,7 @@ impl FStackConfig {
 /// `net.inet.tcp.delayed_ack=0` under `[freebsd.sysctl]` in `config.ini`;
 /// it applies to all connections.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TcpSocketOptions {
     /// Disable Nagle's algorithm — send data immediately without coalescing
     /// small writes. Essential for latency-sensitive protocols.
@@ -269,8 +275,9 @@ pub struct TcpSocketOptions {
     /// the stack sends buffered data in the background after close.
     pub linger_secs: Option<u32>,
 
-    /// Allow multiple sockets to bind the same address:port combination.
-    /// Useful for multi-process F-Stack setups.
+    /// Allow several sockets in this process to bind the same address and
+    /// port. Not needed for multi-process mode: each process has its own
+    /// stack, so their ports never collide.
     pub reuse_port: Option<bool>,
 }
 

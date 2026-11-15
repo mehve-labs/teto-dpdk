@@ -15,6 +15,11 @@ abort and soundness bugs in 0.2.0. **Breaking.**
 - **teto-tokio:** sockets are created from a `TetoRuntime`:
   `TetoTcpListener::bind(&rt, addr, opts)`, `TetoUdpSocket::bind(&rt, addr)`.
   `TetoUdpSocket::recv_from` takes `&self`.
+- `TcpSocketOptions` and `ProcType` are `#[non_exhaustive]`: build options
+  with `TcpSocketOptions::default()` and the builder methods.
+  `FStackConfig::config_args`/`eal_args` are no longer public.
+- teto-tokio no longer enables tokio's `rt-multi-thread` and `macros`
+  features; enable them in your own `Cargo.toml` if you use `#[tokio::main]`.
 - `TcpSocketOptions::quickack` and `TcpSocketOptions::to_ffi` are removed
   (FreeBSD has no `TCP_QUICKACK`; use `net.inet.tcp.delayed_ack=0` in `config.ini`).
 - Addresses are no longer silently rewritten: 0.2.0 bound IPv6 addresses to `0.0.0.0`; IPv6 is now supported properly.
@@ -60,6 +65,9 @@ abort and soundness bugs in 0.2.0. **Breaking.**
   iteration; several copies and allocations per message.
 - Dropping a stream now delivers its buffered data and FIN before closing.
 - Downstream crates failed to link (link flags didn't propagate to dependents).
+- With `capture_init_output(true)`, init failures where DPDK exits the
+  process (`rte_exit`) now print the captured output instead of exiting
+  silently.
 - Double free when F-Stack's poll loop returned (an F-Stack argv bug is now
   worked around).
 
