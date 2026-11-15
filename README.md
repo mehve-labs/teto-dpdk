@@ -190,7 +190,7 @@ let cfg = FStackConfig::new("/etc/teto/config.ini")
 
 The profiles read `config.ini` from the working directory unless `TETO_CONFIG` names another file (or use `with_config_file`). A missing file is reported before F-Stack is initialised, so it can be fixed without restarting the process.
 
-F-Stack and DPDK print a few dozen lines while initialising (EAL messages, a config echo, interface setup). `FStackConfig::capture_init_output(true)` keeps them off the terminal. On failure they're appended to the error, which is usually the best diagnostic available; on success they're available from `FStack::init_output()` / `TetoRuntime::init_output()`. It redirects the process's stdout/stderr for the duration of init, so leave it off if other threads may be printing then. For DPDK's runtime logging, the `[dpdk]` `log_level` key in `config.ini` applies.
+F-Stack and DPDK print a few dozen lines while initialising (EAL messages, a config echo, interface setup). `FStackConfig::capture_init_output(true)` keeps them off the terminal. On failure they're appended to the error, which is usually the best diagnostic available (if DPDK exits the process instead, they're written to stderr first); on success they're available from `FStack::init_output()` / `TetoRuntime::init_output()`. It redirects the process's stdout/stderr for the duration of init, so leave it off if other threads may be printing then. For DPDK's runtime logging, the `[dpdk]` `log_level` key in `config.ini` applies.
 
 ## Project Structure
 
@@ -212,15 +212,18 @@ teto-dpdk/                          (Cargo workspace root)
 │   └── fstack_wrapper.cpp  # Thin errno-returning wrappers over ff_* calls
 ├── teto-tokio/             # Async adapter crate
 │   ├── src/
-│   │   ├── lib.rs          # Re-exports TetoTcpListener, TetoTcpStream, TetoUdpSocket
+│   │   ├── lib.rs          # Re-exports TetoRuntime, TetoTcpListener, TetoTcpStream, TetoUdpSocket
+│   │   ├── runtime.rs      # TetoRuntime: starts the F-Stack thread, sends it commands
+│   │   ├── driver.rs       # F-Stack-thread side: kqueue loop, accept, connect, read/write
 │   │   ├── conn.rs         # Per-connection state shared with the F-Stack thread
-│   │   ├── tcp_driver.rs   # F-Stack-thread side: kqueue loop, accept, read/write
+│   │   ├── local.rs        # Local mode: tokio tasks on the F-Stack thread (local::run)
 │   │   ├── tcp_listener.rs # Async TCP listener (mirrors tokio::net::TcpListener)
 │   │   ├── tcp_stream.rs   # Async TCP stream (AsyncRead + AsyncWrite)
 │   │   └── udp_socket.rs   # Async UDP socket and its F-Stack-thread driver
 │   ├── tests/              # Integration tests (need the Docker environment)
 │   └── examples/
 │       ├── tcp_echo_async.rs   # Async TCP echo (cargo run -p teto-tokio --example tcp_echo_async)
+│       ├── tcp_echo_local.rs   # Same echo in local mode (cargo run -p teto-tokio --example tcp_echo_local)
 │       ├── udp_echo_async.rs   # Async UDP echo (cargo run -p teto-tokio --example udp_echo_async)
 │       ├── kernel_echo.rs      # Same echo on tokio::net, as a benchmark baseline
 │       └── bench_client.rs     # RTT / throughput client
@@ -262,9 +265,9 @@ They cover the failure modes that matter for a network stack: half-close, connec
 
 ## Performance
 
-No performance numbers are published yet. `scripts/bench.sh` runs the same echo benchmark (RTT percentiles and throughput) against teto-tokio and a `tokio::net` baseline. Numbers from the Docker setup mostly measure the veth pair and `af_packet` driver (syscalls per packet) and, on Apple Silicon, x86 emulation. A meaningful comparison needs two hosts with real NICs; the script header describes how to run one.
+No real-NIC numbers are published yet; the only figures so far come from the Docker setup (p50 echo round trip: 5.4 µs in local mode, 11.6 µs with `TetoRuntime`, 31.7 µs for `tokio::net` over kernel loopback). `scripts/bench.sh` runs the same echo benchmark (RTT percentiles and throughput) against teto-tokio and a `tokio::net` baseline. Numbers from the Docker setup mostly measure the veth pair and `af_packet` driver (syscalls per packet) and, on Apple Silicon, x86 emulation. A meaningful comparison needs two hosts with real NICs; the script header describes how to run one.
 
-The shipped `config.ini` sets `pkt_tx_delay=0`, so F-Stack transmits immediately instead of batching for up to 100 µs (its own default). In the Docker setup that took echo p50 RTT from 200 µs to 36 µs, with no measurable throughput change. On a real NIC at high packet rates, batching may matter for bulk throughput, so raise it toward 100 for throughput-bound workloads.
+The shipped `config.ini` sets `pkt_tx_delay=0`, so F-Stack transmits immediately instead of batching for up to 100 µs (its own default). In the Docker setup that alone took echo p50 RTT from 200 µs to 36 µs (before later data-path changes brought it to the figures above), with no measurable throughput change. On a real NIC at high packet rates, batching may matter for bulk throughput, so raise it toward 100 for throughput-bound workloads.
 
 The tokio adapter copies each payload twice in each direction (between F-Stack and a per-connection buffer, and between that buffer and yours). That is one copy more than a kernel socket, the price of handing data between threads; the low-level API reads and writes F-Stack directly. There are no per-message allocations on the TCP path, and UDP datagrams are carved out of 1 MiB blocks.
 

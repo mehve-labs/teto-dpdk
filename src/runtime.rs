@@ -54,7 +54,13 @@ impl FStack {
     /// DPDK cannot be re-initialised once its EAL init has started.
     ///
     /// Some fatal DPDK errors terminate the process inside DPDK itself
-    /// (`rte_exit`); those cannot be turned into an `Err`.
+    /// (`rte_exit`); those cannot be turned into an `Err`. With
+    /// [`FStackConfig::capture_init_output`] on, what was captured is written
+    /// to stderr before the process exits.
+    ///
+    /// DPDK pins the calling thread to its core (from `lcore_mask`), and
+    /// threads spawned from it afterwards inherit that pinning; start helper
+    /// threads before `init`, or reset their affinity.
     pub fn init(cfg: &FStackConfig) -> io::Result<FStack> {
         // Checked before anything touches F-Stack, so a wrong path can be
         // fixed and init retried (a failed F-Stack init can't be).

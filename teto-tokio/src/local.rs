@@ -11,6 +11,20 @@
 //! Trade-offs: everything runs on one thread (CPU-heavy work stalls the
 //! network; use `spawn_blocking` for it), and the socket types are `!Send`.
 //!
+//! Things to know:
+//!
+//! - DPDK pins the calling thread to its core (the first core in
+//!   `lcore_mask`), and threads started from it inherit that pinning. That
+//!   includes tokio's blocking pool, so `spawn_blocking` work shares the core
+//!   with the busy-polling network loop. For real offloading, send the work to
+//!   a thread (or runtime) started *before* [`run`], or reset the new
+//!   thread's CPU affinity yourself.
+//! - [`run`] starts its own runtime, so call it from plain synchronous code
+//!   (e.g. `fn main`), not from inside `#[tokio::main]` or another tokio
+//!   runtime, where it panics.
+//! - The runtime has timers but no I/O driver: `tokio::net` and other
+//!   OS-socket types don't work inside it. Use the `Local*` types.
+//!
 //! ```rust,no_run
 //! use teto_dpdk::{FStackConfig, TcpSocketOptions};
 //! use teto_tokio::local::{self, LocalTcpListener};
