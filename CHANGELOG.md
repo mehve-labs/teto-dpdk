@@ -2,7 +2,7 @@
 
 Both crates (`teto-dpdk`, `teto-tokio`) are versioned together.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-11-15
 
 A rework of both crates after a review that found data-corruption, hang,
 abort and soundness bugs in 0.2.0. **Breaking.**
